@@ -44,6 +44,9 @@ type Arena struct {
 	Z *float64 `json:"z"`
 	// SummaryJSON is the path of the JSON summary (RunSummary); "" for none.
 	SummaryJSON string `json:"summary_json"`
+	// RunLog is the run log: one RunSummary JSON line is appended per run
+	// (see appendRunLog); "" for none.
+	RunLog string `json:"runlog"`
 
 	// Run totals that aren't attributed to a player. Decided counts valid
 	// games that produced a result (win, loss or draw).

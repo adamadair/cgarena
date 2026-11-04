@@ -60,6 +60,7 @@ Values in the config file override the corresponding command-line flags. Only no
 | `-p1`, `-p2` | | Commands for players 1 and 2 (required) |
 | `-p3`, `-p4` | | Commands for players 3 and 4 (optional) |
 | `-pn1` to `-pn4` | `Player1` to `Player4` | Optional display names for players 1 to 4 (`-pn3`/`-pn4` only apply if that player's command is given). Names must be unique. |
+| `-pc1` to `-pc4` | | Optional git directory each player's bot was built from (config key `commit_dir` per player). Its commit and dirty state are recorded in `-runlog` and `-summary-json`. See [Run log](#run-log). |
 | `-n` | `1` | Number of games to play (at least 1) |
 | `-t` | `1` | Number of games to run in parallel (at least 1) |
 | `-i` | `0` | Base seed. Without `-s`, game *N* uses `seed + N`; with `-s`, see [Seeds](#seeds). If 0 or less, a random base seed is picked and printed. |
@@ -74,6 +75,7 @@ Values in the config file override the corresponding command-line flags. Only no
 | `-md` | | Write a Markdown summary to this path |
 | `-html` | | Write an HTML summary to this path |
 | `-summary-json` | | Write a JSON summary to this path (config key `summary_json`). See [JSON summary](#json-summary). |
+| `-runlog` | | Append one JSON line per run to this file (config key `runlog`). See [Run log](#run-log). |
 | `-config` | | Path to a JSON config file |
 | `-v` | | Print the version |
 | `-h` | | Print help |
@@ -237,8 +239,9 @@ With more than two players, each player's W/L/D, win rate and interval are again
   "swap": true,
   "games": 100,
   "threads": 4,
+  "z": 1.96,
   "players": [
-    {"name": "A", "cmd": "./bots/a", "commit": null, "dirty": null,
+    {"name": "A", "cmd": "./bots/a", "commit": "5c9cdf4…", "dirty": false,
      "w": 61, "l": 33, "d": 4, "win_rate": 0.6428571428571429,
      "ci": [0.5443, 0.7307], "faults": 0},
     {"name": "B", "...": "..."}
@@ -254,11 +257,31 @@ With more than two players, each player's W/L/D, win rate and interval are again
 - `date` is the time the run ended, in UTC (RFC 3339). `games` is the number of games requested (`-n`).
 - `win_rate` and `ci` are fractions (not percentages) at the run's `-z`; both are `null` when the player has no win, loss or draw.
 - `faults` is `null` without `-fault-pattern`.
-- `commit` and `dirty` are always `null` for now.
+- `z` is the z value of the confidence intervals (`-z`).
+- `commit` and `dirty` are the player's git commit and whether its working tree had uncommitted changes, from `-pcN` / `commit_dir`; `null` without one or when git failed (see [Run log](#run-log)).
 - `results_file` is the per-game results file (see [Per-game results](#per-game-results)), or `null` when there is none.
 - Unlike `-md`/`-html`, the file is also written for an interrupted run, with `"interrupted": true`, so the totals are clearly marked as incomplete.
 
 A failure to write any summary file exits with code 1.
+
+### Run log
+
+`-runlog <file>` (config key `runlog`) appends one line to the file per run: the same object as the [JSON summary](#json-summary), on a single line. It keeps a history of runs, for example:
+
+```json
+{"date":"2026-11-04T15:52:21Z","cgarena":"1.0.2","referee":"java -jar referee.jar","seed_from":100,"seed_to":101,"swap":true,"games":4,"threads":2,"z":1.96,"players":[{"name":"Boss","cmd":"mono bots/Boss.exe","commit":"1cb42e318b472bb8658ba52108fe69f13d0a4c31","dirty":true,"w":4,"l":0,"d":0,"win_rate":1,"ci":[0.5100999795960008,1],"faults":null},{"name":"L1Boss","cmd":"mono bots/L1Boss.exe","commit":"1cb42e318b472bb8658ba52108fe69f13d0a4c31","dirty":true,"w":0,"l":4,"d":0,"win_rate":0,"ci":[0,0.48990002040399916],"faults":null}],"double_forfeits":0,"invalid":0,"invalid_reasons":{},"interrupted":false,"results_file":"logs/games.jsonl"}
+```
+
+- The file is created if missing and only ever appended to, never truncated. Each run adds one complete line, written at once at the end of the run (`date` is the time the run ended, in UTC, RFC 3339).
+- A line is appended for runs with invalid games (exit code 3) and for interrupted runs (`"interrupted": true`, exit code 130), so they stay visible in the history. Usage and config errors (exit code 1) happen before any game is played and add no line; neither does a run that fails with a harness error (for example the per-game results file can't be written).
+- `z` records the confidence level the run's intervals used.
+- Failing to append to the run log exits with code 1.
+
+Each player's commit comes from `-pc1` … `-pc4 <dir>` (or `"commit_dir"` in that player's config entry): cgarena records `git -C <dir> rev-parse HEAD` as `commit`, and whether `git -C <dir> status --porcelain` prints anything (uncommitted or untracked files) as `dirty`. The directory is relative to the working directory. The commits are read once, at the start of the run, before any game, so rebuilding a bot during the run doesn't change what is recorded. Without a directory, `commit` and `dirty` are `null`. If git fails (not a repository, no commit yet, git not installed), they are `null` too and cgarena prints `Warning: can't read the git commit of <name> from <dir>, recording null: <git error>`; the run goes on and its exit code doesn't change.
+
+Two bots built from the same working tree record the same commit. To compare an older version, build it from its own checkout (e.g. a `git worktree`) and point its `-pcN` there.
+
+`-pcN` flags, like `-pnN`, apply to the flag-defined players; when the config file defines `players`, set `commit_dir` there instead.
 
 If no game produced a result (win, loss or draw) and at least one game was a double forfeit, cgarena prints a line after the summary and exits with code 3. This usually means both bot commands are broken, for example a missing executable, so every game ends `-1`/`-1`:
 

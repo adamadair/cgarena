@@ -80,11 +80,18 @@ func runArena(arena *Arena) error {
 }
 
 type Player struct {
-	Name   string `json:"name"`
-	Cmd    string `json:"cmd"`
-	Wins   int
-	Losses int
-	Ties   int
+	Name string `json:"name"`
+	Cmd  string `json:"cmd"`
+	// CommitDir is the git directory the bot was built from (-pcN, config
+	// commit_dir); "" for none. Commit and Dirty are its HEAD commit and
+	// whether its working tree had changes, read once at the start of the
+	// run by resolveCommits (nil without CommitDir or when git failed).
+	CommitDir string  `json:"commit_dir"`
+	Commit    *string `json:"-"`
+	Dirty     *bool   `json:"-"`
+	Wins      int
+	Losses    int
+	Ties      int
 	// Played counts the valid games (double forfeits included) the player
 	// played, and Faults those in which it matched the fault pattern.
 	Played int `json:"-"`
@@ -187,6 +194,16 @@ func applyPlayerNames(players []Player, names ...string) {
 	}
 }
 
+// applyCommitDirs sets player commit directories from the -pcN flag values,
+// skipping empty values and players that don't exist.
+func applyCommitDirs(players []Player, dirs ...string) {
+	for i, dir := range dirs {
+		if dir != "" && i < len(players) {
+			players[i].CommitDir = dir
+		}
+	}
+}
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
@@ -208,6 +225,10 @@ func run(args []string) int {
 	pn2Flag := fs.String("pn2", "", "Display name for player 2 (optional, default Player2)")
 	pn3Flag := fs.String("pn3", "", "Display name for player 3 (optional, default Player3)")
 	pn4Flag := fs.String("pn4", "", "Display name for player 4 (optional, default Player4)")
+	pc1Flag := fs.String("pc1", "", "Git directory player 1 was built from; its commit and dirty state go into -runlog and -summary-json (optional)")
+	pc2Flag := fs.String("pc2", "", "Git directory player 2 was built from (optional, see -pc1)")
+	pc3Flag := fs.String("pc3", "", "Git directory player 3 was built from (optional, see -pc1)")
+	pc4Flag := fs.String("pc4", "", "Git directory player 4 was built from (optional, see -pc1)")
 	lFlag := fs.String("l", "off", "Directory for game logs (none or off disables logging)")
 	overwriteFlag := fs.Bool("overwrite", false, "Delete match_*.json, match_*.err and games.jsonl from an existing log directory (and replace an existing -out file) instead of refusing to run")
 	sFlag := fs.Bool("s", false, "Swap player positions, playing each map from every seating (-n must be a multiple of the number of seatings)")
@@ -221,6 +242,7 @@ func run(args []string) int {
 	markdownPath := fs.String("md", "", "Path to Markdown summary output")
 	htmlPath := fs.String("html", "", "Path to HTML summary output")
 	summaryJSONFlag := fs.String("summary-json", "", "Path to JSON summary output (also written for interrupted runs, with \"interrupted\": true)")
+	runLogFlag := fs.String("runlog", "", "Run log: append one JSON line per run (same fields as -summary-json), also for runs with invalid games and interrupted runs")
 	zFlag := fs.Float64("z", defaultZ, "z value of the win-rate confidence interval (1.96 = 95%, 2.576 = 99%); must be > 0")
 
 	if err := fs.Parse(args); err != nil {
@@ -263,6 +285,7 @@ func run(args []string) int {
 		FaultPattern: *faultPatternFlag,
 		Z:            zFlag,
 		SummaryJSON:  *summaryJSONFlag,
+		RunLog:       *runLogFlag,
 	}
 
 	if *p3Flag != "" {
@@ -274,6 +297,7 @@ func run(args []string) int {
 	}
 
 	applyPlayerNames(arena.Players, *pn1Flag, *pn2Flag, *pn3Flag, *pn4Flag)
+	applyCommitDirs(arena.Players, *pc1Flag, *pc2Flag, *pc3Flag, *pc4Flag)
 
 	if *sFlag {
 		arena.Swap = true
@@ -331,6 +355,9 @@ func run(args []string) int {
 		if fileCfg.SummaryJSON != "" {
 			arena.SummaryJSON = fileCfg.SummaryJSON
 		}
+		if fileCfg.RunLog != "" {
+			arena.RunLog = fileCfg.RunLog
+		}
 	}
 
 	// Check required flags
@@ -344,16 +371,29 @@ func run(args []string) int {
 		return exitUsage
 	}
 
+	// Commits are read once, before any game, so a bot rebuilt during the
+	// run doesn't change the record.
+	for _, warning := range resolveCommits(arena.Players) {
+		fmt.Println(warning)
+	}
+
 	if err := runArena(arena); err != nil {
 		log.Printf("Failed to run arena: %v", err)
 		return exitUsage
 	}
 	summary := arena.Summary(time.Now())
-	// The JSON summary is written for interrupted runs too: it says so in
-	// its "interrupted" field, as the run log will.
+	// The JSON summary and the run log are written for interrupted runs and
+	// runs with invalid games too: they say so in their "interrupted" and
+	// "invalid" fields.
 	if arena.SummaryJSON != "" {
 		if err := writeSummaryJSON(summary, arena.SummaryJSON); err != nil {
 			log.Printf("Failed to write JSON summary: %v", err)
+			return exitUsage
+		}
+	}
+	if arena.RunLog != "" {
+		if err := appendRunLog(summary, arena.RunLog); err != nil {
+			log.Printf("Failed to append to the run log: %v", err)
 			return exitUsage
 		}
 	}

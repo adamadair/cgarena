@@ -47,7 +47,8 @@ func confidenceLabel(z float64) string {
 }
 
 // PlayerSummary is one player's totals in a RunSummary. The fields match the
-// run-log entry; Commit and Dirty stay null until the run log fills them in.
+// run-log entry; Commit and Dirty are null without a commit directory (-pcN)
+// or when git failed.
 type PlayerSummary struct {
 	Name   string  `json:"name"`
 	Cmd    string  `json:"cmd"`
@@ -64,8 +65,9 @@ type PlayerSummary struct {
 	Faults *int `json:"faults"`
 }
 
-// RunSummary is the summary of a run, written by -summary-json. Its fields
-// are those of the run-log entry (spec section 7).
+// RunSummary is the summary of a run, written by -summary-json and appended
+// as one line to the -runlog file. Its fields are those of the run-log entry
+// (spec section 7), plus z. Date is the time the run ended.
 type RunSummary struct {
 	Date           string          `json:"date"`
 	Cgarena        string          `json:"cgarena"`
@@ -75,6 +77,7 @@ type RunSummary struct {
 	Swap           bool            `json:"swap"`
 	Games          int             `json:"games"`
 	Threads        int             `json:"threads"`
+	Z              float64         `json:"z"`
 	Players        []PlayerSummary `json:"players"`
 	DoubleForfeits int             `json:"double_forfeits"`
 	Invalid        int             `json:"invalid"`
@@ -83,9 +86,8 @@ type RunSummary struct {
 	ResultsFile    *string         `json:"results_file"` // null without a results file
 
 	// Used for the text, Markdown and HTML summaries only.
-	Z        float64 `json:"-"`
-	Maps     int     `json:"-"`
-	Finished int     `json:"-"`
+	Maps     int `json:"-"`
+	Finished int `json:"-"`
 }
 
 // Summary returns the run's summary as of now. Call it after the run.
@@ -117,7 +119,7 @@ func (a *Arena) Summary(now time.Time) RunSummary {
 		s.ResultsFile = &path
 	}
 	for i, p := range a.Players {
-		ps := PlayerSummary{Name: p.Name, Cmd: p.Cmd, W: p.Wins, L: p.Losses, D: p.Ties}
+		ps := PlayerSummary{Name: p.Name, Cmd: p.Cmd, Commit: p.Commit, Dirty: p.Dirty, W: p.Wins, L: p.Losses, D: p.Ties}
 		n := p.Wins + p.Losses + p.Ties
 		if lo, hi, ok := wilson(float64(p.Wins)+float64(p.Ties)/2, n, z); ok {
 			rate := p.WinPct()
