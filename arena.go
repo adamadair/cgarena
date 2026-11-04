@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,6 +32,15 @@ type Arena struct {
 	// Timeout limits each game (see Referee.Timeout); 0 means no limit. In
 	// the config file it is a Go duration string, e.g. "45s".
 	Timeout Duration `json:"timeout"`
+	// Out is the per-game results file (JSONL). Empty means
+	// <LogOutput>/games.jsonl with logging on, and no file otherwise.
+	Out string `json:"out"`
+	// JSONCheck cross-checks each game's JSON log against stdout when
+	// logging is on (see Referee.JSONCheck); nil means on.
+	JSONCheck *bool `json:"json_check"`
+	// FaultPattern is a regular expression for faults (see
+	// Referee.FaultPattern); it needs logging on.
+	FaultPattern string `json:"fault_pattern"`
 
 	// Run totals that aren't attributed to a player. Decided counts valid
 	// games that produced a result (win, loss or draw).
@@ -43,6 +53,11 @@ type Arena struct {
 	// were running then and were killed; their games count toward nothing.
 	Interrupted bool `json:"-"`
 	Killed      int  `json:"-"`
+
+	// out is the open results file during RunContext (nil if none), and
+	// outErr the first error writing it. Only the collector writes them.
+	out    *os.File
+	outErr error
 }
 
 // Validate checks the settings Run depends on.
@@ -61,6 +76,12 @@ func (a *Arena) Validate() error {
 	if a.Timeout < 0 {
 		return fmt.Errorf("timeout (-timeout) must not be negative, got %s", time.Duration(a.Timeout))
 	}
+	if _, err := a.faultRegexp(); err != nil {
+		return err
+	}
+	if a.FaultPattern != "" && !a.IsLoggingOutput() {
+		return fmt.Errorf("fault pattern (-fault-pattern) needs logging on (-l <dir>): faults are read from the referee's JSON logs")
+	}
 	seen := map[string]int{}
 	for i, p := range a.Players {
 		if j, dup := seen[p.Name]; dup {
@@ -69,6 +90,54 @@ func (a *Arena) Validate() error {
 				j+1, i+1, p.Name)
 		}
 		seen[p.Name] = i
+	}
+	return nil
+}
+
+// faultRegexp compiles FaultPattern; it returns nil for an empty pattern.
+func (a *Arena) faultRegexp() (*regexp.Regexp, error) {
+	if a.FaultPattern == "" {
+		return nil, nil
+	}
+	re, err := regexp.Compile(a.FaultPattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid fault pattern (-fault-pattern) %q: %v", a.FaultPattern, err)
+	}
+	return re, nil
+}
+
+// jsonCheck reports whether JSON logs are cross-checked (with logging on).
+func (a *Arena) jsonCheck() bool {
+	return a.JSONCheck == nil || *a.JSONCheck
+}
+
+// resultsPath returns the per-game results file, or "" for none.
+func (a *Arena) resultsPath() string {
+	if a.Out != "" {
+		return a.Out
+	}
+	if a.IsLoggingOutput() {
+		return filepath.Join(a.LogOutput, "games.jsonl")
+	}
+	return ""
+}
+
+// checkResultsFile refuses an existing non-empty results file unless
+// Overwrite is set, so earlier results are never lost by accident.
+func checkResultsFile(path string, overwrite bool) error {
+	info, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("results file %q: %w", path, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("results file (-out) %q is a directory", path)
+	}
+	if info.Size() > 0 && !overwrite {
+		return fmt.Errorf("results file (-out) %q already holds results from an earlier run; "+
+			"use -overwrite to replace it, or choose another -out file", path)
 	}
 	return nil
 }
@@ -121,6 +190,13 @@ func (a *Arena) RunContext(ctx context.Context) error {
 	a.Interrupted = false
 	a.Killed = 0
 
+	a.out = nil
+	a.outErr = nil
+	faultPattern, err := a.faultRegexp()
+	if err != nil {
+		return err
+	}
+
 	order := a.seatOrders()
 	k := len(order)
 	randomSeed := a.Seed <= 0
@@ -128,14 +204,30 @@ func (a *Arena) RunContext(ctx context.Context) error {
 		a.Seed = randomBaseSeed(a.Games / k)
 	}
 
+	outPath := a.resultsPath()
+	if outPath != "" && a.Out != "" {
+		// The default (games.jsonl in the log dir) is checked by prepareLogDir.
+		if err := checkResultsFile(outPath, a.Overwrite); err != nil {
+			return err
+		}
+	}
 	if a.IsLoggingOutput() {
 		if err := prepareLogDir(a.LogOutput, a.Overwrite); err != nil {
 			return err
 		}
 	}
+	if outPath != "" {
+		f, err := os.Create(outPath)
+		if err != nil {
+			return fmt.Errorf("results file: %w", err)
+		}
+		defer f.Close()
+		a.out = f
+	}
 	fmt.Println(a.seedRangeLine(randomSeed))
 
 	refCmd, seed, logOutput, timeout := a.Referee, a.Seed, a.LogOutput, time.Duration(a.Timeout)
+	jsonCheck := a.jsonCheck()
 	jobs := make(chan int, a.Games)
 	results := make(chan gameResult)
 
@@ -155,6 +247,9 @@ func (a *Arena) RunContext(ctx context.Context) error {
 					Seed:      gameSeed(seed, matchID, k),
 					LogOutput: logOutput,
 					Timeout:   timeout,
+					JSONCheck: jsonCheck,
+					// A compiled Regexp is safe for concurrent use.
+					FaultPattern: faultPattern,
 				}
 				result, err := ref.RunContext(ctx, matchID)
 				results <- gameResult{matchID: matchID, result: result, err: err}
@@ -183,6 +278,9 @@ func (a *Arena) RunContext(ctx context.Context) error {
 	if ctx.Err() != nil && a.Finished() < a.Games {
 		a.Interrupted = true
 	}
+	if a.outErr != nil {
+		return fmt.Errorf("writing results file: %w", a.outErr)
+	}
 	return nil
 }
 
@@ -210,6 +308,7 @@ func (a *Arena) collect(gr gameResult) {
 		}
 		return
 	}
+	a.writeRecord(gr)
 	if gr.err != nil {
 		a.Invalid++
 		a.InvalidReasons[result.InvalidReason]++
@@ -226,8 +325,84 @@ func (a *Arena) collect(gr gameResult) {
 		p.Wins += result.Players[j].Wins
 		p.Losses += result.Players[j].Losses
 		p.Ties += result.Players[j].Ties
+		p.Played++
+		if result.Faults[j] {
+			p.Faults++
+		}
 	}
 	log.Printf("Match %d completed: %v", gr.matchID, result.String())
+}
+
+// GameRecord is one line of the per-game results file (-out).
+type GameRecord struct {
+	Game          int               `json:"game"`
+	Seed          int               `json:"seed"`
+	Seats         []string          `json:"seats"`  // player name per seat
+	Scores        []int             `json:"scores"` // per seat; null for invalid games
+	Outcome       map[string]string `json:"outcome"`
+	EndReason     string            `json:"end_reason"`
+	Fault         map[string]bool   `json:"fault"`
+	InvalidReason string            `json:"invalid_reason"`
+	DurationMs    int64             `json:"duration_ms"`
+	Log           string            `json:"log"`
+}
+
+// newGameRecord builds the results-file record of a finished game.
+func newGameRecord(gr gameResult) GameRecord {
+	result := gr.result
+	rec := GameRecord{
+		Game:          gr.matchID,
+		Seed:          result.Seed,
+		Seats:         make([]string, len(result.Seats)),
+		Outcome:       map[string]string{},
+		EndReason:     result.EndReason,
+		Fault:         map[string]bool{},
+		InvalidReason: result.InvalidReason,
+		DurationMs:    result.Duration.Milliseconds(),
+		Log:           result.LogFile,
+	}
+	if result.InvalidReason == "" {
+		rec.Scores = result.Scores
+	}
+	for j, seat := range result.Seats {
+		rec.Seats[j] = seat.Name
+		outcome := OutcomeInvalid
+		if result.InvalidReason == "" && j < len(result.Outcomes) {
+			outcome = result.Outcomes[j]
+		}
+		rec.Outcome[seat.Name] = outcome
+		rec.Fault[seat.Name] = j < len(result.Faults) && result.Faults[j]
+	}
+	return rec
+}
+
+// writeRecord appends gr's record to the results file, if there is one. It
+// must only be called from the collector goroutine. After the first write
+// error it stops writing; RunContext returns that error.
+func (a *Arena) writeRecord(gr gameResult) {
+	if a.out == nil || a.outErr != nil {
+		return
+	}
+	data, err := json.Marshal(newGameRecord(gr))
+	if err == nil {
+		_, err = a.out.Write(append(data, '\n'))
+	}
+	if err != nil {
+		a.outErr = err
+		log.Printf("Failed to write results file: %v", err)
+	}
+}
+
+// FaultWarnings returns one warning per player that faulted in every valid
+// game it played (none if no game was valid for it).
+func (a *Arena) FaultWarnings() []string {
+	var warnings []string
+	for _, p := range a.Players {
+		if p.Played > 0 && p.Faults == p.Played {
+			warnings = append(warnings, fmt.Sprintf("Warning: %s faulted in all %d games (check its command)", p.Name, p.Played))
+		}
+	}
+	return warnings
 }
 
 // isResultFile reports whether a file name is one cgarena writes into the log
@@ -309,7 +484,11 @@ func (a *Arena) PrintResults() string {
 		sb.WriteString(player.Name + ": " + fmt.Sprintf("%.2f%% Win Rate; ", player.WinPct()*100) +
 			strconv.Itoa(player.Wins) + " Wins; " +
 			strconv.Itoa(player.Losses) + " Losses; " +
-			strconv.Itoa(player.Ties) + " Ties\n")
+			strconv.Itoa(player.Ties) + " Ties")
+		if a.FaultPattern != "" {
+			sb.WriteString("; " + strconv.Itoa(player.Faults) + " Faults")
+		}
+		sb.WriteString("\n")
 	}
 	sb.WriteString("Double forfeits: " + strconv.Itoa(a.DoubleForfeits) +
 		"   Invalid: " + strconv.Itoa(a.Invalid))

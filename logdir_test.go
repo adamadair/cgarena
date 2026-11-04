@@ -8,10 +8,13 @@ import (
 	"testing"
 )
 
-// logWriter is a fake referee that writes {} to the file given with -l, if
-// any, and reports a win for seat 1.
-const logWriter = `while [ $# -gt 0 ]; do [ "$1" = "-l" ] && echo '{}' > "$2"; shift; done
+// logWriter is a fake referee that writes a minimal SDK JSON log (scores
+// only) to the file given with -l, if any, and reports a win for seat 1.
+const logWriter = `while [ $# -gt 0 ]; do [ "$1" = "-l" ] && echo '{"scores":{"0":5,"1":3}}' > "$2"; shift; done
 echo 5; echo 3`
+
+// logFiles is what a two-game run with logging on leaves in the log dir.
+const logFiles = "games.jsonl match_0.err match_0.json match_1.err match_1.json"
 
 func writeFiles(t *testing.T, dir string, names ...string) {
 	t.Helper()
@@ -58,7 +61,7 @@ func TestRun_LogDirMissingIsCreated(t *testing.T) {
 	if got := run(runArgs(ref, logDir)); got != exitOK {
 		t.Fatalf("exit = %d, want %d", got, exitOK)
 	}
-	if got, want := strings.Join(dirNames(t, logDir), " "), "match_0.json match_1.json"; got != want {
+	if got, want := strings.Join(dirNames(t, logDir), " "), logFiles; got != want {
 		t.Errorf("log dir holds %q, want %q", got, want)
 	}
 }
@@ -69,7 +72,7 @@ func TestRun_LogDirEmptyIsUsed(t *testing.T) {
 	if got := run(runArgs(ref, logDir)); got != exitOK {
 		t.Fatalf("exit = %d, want %d", got, exitOK)
 	}
-	if got, want := strings.Join(dirNames(t, logDir), " "), "match_0.json match_1.json"; got != want {
+	if got, want := strings.Join(dirNames(t, logDir), " "), logFiles; got != want {
 		t.Errorf("log dir holds %q, want %q", got, want)
 	}
 }
@@ -84,7 +87,7 @@ func TestRun_LogDirWithUnrelatedFilesIsUsed(t *testing.T) {
 	if got := run(runArgs(ref, logDir)); got != exitOK {
 		t.Fatalf("exit = %d, want %d", got, exitOK)
 	}
-	want := "match_0.json match_1.json notes.txt sub summary.md"
+	want := logFiles + " notes.txt sub summary.md"
 	if got := strings.Join(dirNames(t, logDir), " "); got != want {
 		t.Errorf("log dir holds %q, want %q", got, want)
 	}
@@ -113,7 +116,8 @@ func TestRun_LogDirWithResultsIsRefused(t *testing.T) {
 }
 
 func TestRun_LogDirOverwriteDeletesOnlyResults(t *testing.T) {
-	// The referee writes no logs, so anything left afterwards was kept.
+	// The referee writes no JSON logs (hence -json-check=false), so apart
+	// from this run's games.jsonl and match_*.err, anything left was kept.
 	ref := fakeReferee(t, "echo 5; echo 3")
 	logDir := t.TempDir()
 	writeFiles(t, logDir, "match_0.json", "match_99.json", "match_3.err", "games.jsonl", "notes.txt", "match_0.txt")
@@ -122,10 +126,10 @@ func TestRun_LogDirOverwriteDeletesOnlyResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFiles(t, sub, "match_1.json")
-	if got := run(runArgs(ref, logDir, "-overwrite")); got != exitOK {
+	if got := run(runArgs(ref, logDir, "-overwrite", "-json-check=false")); got != exitOK {
 		t.Fatalf("exit = %d, want %d", got, exitOK)
 	}
-	want := "match_0.txt match_sub.json notes.txt"
+	want := "games.jsonl match_0.err match_0.txt match_1.err match_sub.json notes.txt"
 	if got := strings.Join(dirNames(t, logDir), " "); got != want {
 		t.Errorf("log dir holds %q, want %q", got, want)
 	}
@@ -142,11 +146,11 @@ func TestRun_LogDirOverwriteFromConfig(t *testing.T) {
 	if err := os.WriteFile(config, []byte(`{"overwrite": true}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := run(runArgs(ref, logDir, "-config", config)); got != exitOK {
+	if got := run(runArgs(ref, logDir, "-config", config, "-json-check=false")); got != exitOK {
 		t.Fatalf("exit = %d, want %d", got, exitOK)
 	}
-	if names := dirNames(t, logDir); len(names) != 0 {
-		t.Errorf("log dir holds %v, want nothing", names)
+	if got, want := strings.Join(dirNames(t, logDir), " "), "games.jsonl match_0.err match_1.err"; got != want {
+		t.Errorf("log dir holds %q, want only this run's %q", got, want)
 	}
 }
 

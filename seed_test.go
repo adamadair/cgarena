@@ -15,7 +15,8 @@ import (
 
 // recordingReferee is a fake referee that writes "<seed> <p1> <p2> ..." into
 // the -l file it is given (so each game's arguments end up in
-// match_<game>.json), then runs scores to print the scores.
+// match_<game>.json), then runs scores to print the scores. That file isn't
+// SDK JSON, so runs using it need the JSON check off (noJSONCheck).
 func recordingReferee(t *testing.T, scores string) string {
 	t.Helper()
 	return fakeReferee(t, `s=none; seats=""
@@ -29,6 +30,12 @@ while [ $# -gt 0 ]; do
 done
 echo "$s$seats" > "$l"
 `+scores)
+}
+
+// noJSONCheck is Arena.JSONCheck turned off.
+func noJSONCheck() *bool {
+	off := false
+	return &off
 }
 
 // gameRecord is what recordingReferee saw for one game.
@@ -59,7 +66,7 @@ func readRecords(t *testing.T, dir string, n int) []gameRecord {
 func TestArena_SwapPairsSeeds(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "logs")
 	arena := Arena{Referee: recordingReferee(t, "echo 5; echo 3"), Players: twoPlayers(),
-		Games: 10, Threads: 4, Seed: 100, LogOutput: dir, Swap: true}
+		Games: 10, Threads: 4, Seed: 100, LogOutput: dir, Swap: true, JSONCheck: noJSONCheck()}
 	if err := arena.Run(); err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +89,7 @@ func TestArena_SwapPairsSeeds(t *testing.T) {
 func TestArena_NoSwapSeedsAreConsecutive(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "logs")
 	arena := Arena{Referee: recordingReferee(t, "echo 5; echo 3"), Players: twoPlayers(),
-		Games: 5, Threads: 3, Seed: 100, LogOutput: dir}
+		Games: 5, Threads: 3, Seed: 100, LogOutput: dir, JSONCheck: noJSONCheck()}
 	if err := arena.Run(); err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +104,7 @@ func TestArena_ThreePlayerSwapBlocksShareSeed(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "logs")
 	players := []Player{{Name: "A", Cmd: "a"}, {Name: "B", Cmd: "b"}, {Name: "C", Cmd: "c"}}
 	arena := Arena{Referee: recordingReferee(t, "echo 9; echo 1; echo 1"), Players: players,
-		Games: 12, Threads: 4, Seed: 50, LogOutput: dir, Swap: true}
+		Games: 12, Threads: 4, Seed: 50, LogOutput: dir, Swap: true, JSONCheck: noJSONCheck()}
 	if err := arena.Run(); err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +175,7 @@ func TestRun_RandomBaseSeed(t *testing.T) {
 	for _, extra := range [][]string{nil, {"-i", "0"}, {"-i", "-5"}} {
 		dir := filepath.Join(t.TempDir(), "logs")
 		args := append([]string{"-r", recordingReferee(t, "echo 5; echo 3"), "-p1", "a", "-p2", "b",
-			"-n", "6", "-t", "3", "-s", "-l", dir}, extra...)
+			"-n", "6", "-t", "3", "-s", "-l", dir, "-json-check=false"}, extra...)
 		code, out := runCapture(t, args...)
 		if code != exitOK {
 			t.Fatalf("%v: exit %d, want %d\n%s", extra, code, exitOK, out)

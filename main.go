@@ -83,6 +83,10 @@ type Player struct {
 	Wins   int
 	Losses int
 	Ties   int
+	// Played counts the valid games (double forfeits included) the player
+	// played, and Faults those in which it matched the fault pattern.
+	Played int `json:"-"`
+	Faults int `json:"-"`
 }
 
 func (p *Player) WinPct() float64 {
@@ -193,11 +197,14 @@ func run(args []string) int {
 	pn3Flag := fs.String("pn3", "", "Display name for player 3 (optional, default Player3)")
 	pn4Flag := fs.String("pn4", "", "Display name for player 4 (optional, default Player4)")
 	lFlag := fs.String("l", "off", "Directory for game logs (none or off disables logging)")
-	overwriteFlag := fs.Bool("overwrite", false, "Delete match_*.json, match_*.err and games.jsonl from an existing log directory instead of refusing to run")
+	overwriteFlag := fs.Bool("overwrite", false, "Delete match_*.json, match_*.err and games.jsonl from an existing log directory (and replace an existing -out file) instead of refusing to run")
 	sFlag := fs.Bool("s", false, "Swap player positions, playing each map from every seating (-n must be a multiple of the number of seatings)")
 	iFlag := fs.Int("i", 0, "Base seed (0 or less picks a random one, printed at the start); with -s, each map's seatings share a seed")
 	oFlag := fs.Bool("o", false, "Use old mode")
 	timeoutFlag := fs.Duration("timeout", 30*time.Second, "Per-game time limit as a Go duration (e.g. 45s, 2m); the referee and the bots it started are killed and the game is invalid (0 disables)")
+	outFlag := fs.String("out", "", "Per-game results file, one JSON object per line (default <log dir>/games.jsonl with -l, else none)")
+	jsonCheckFlag := fs.Bool("json-check", true, "With -l, make a game invalid (json_log) if the referee's JSON log is missing, unparseable or its scores differ from stdout")
+	faultPatternFlag := fs.String("fault-pattern", "", "Regular expression: a player is faulted in a game when a JSON log tooltip or summary line matches it and names its seat as $<seat> (needs -l)")
 	configPath := fs.String("config", "", "Path to JSON config")
 	markdownPath := fs.String("md", "", "Path to Markdown summary output")
 	htmlPath := fs.String("html", "", "Path to HTML summary output")
@@ -236,6 +243,10 @@ func run(args []string) int {
 		Seed:      *iFlag,
 		LogOutput: *lFlag,
 		Timeout:   Duration(*timeoutFlag),
+
+		Out:          *outFlag,
+		JSONCheck:    jsonCheckFlag,
+		FaultPattern: *faultPatternFlag,
 	}
 
 	if *p3Flag != "" {
@@ -289,6 +300,15 @@ func run(args []string) int {
 		if fileCfg.Timeout != 0 {
 			arena.Timeout = fileCfg.Timeout
 		}
+		if fileCfg.Out != "" {
+			arena.Out = fileCfg.Out
+		}
+		if fileCfg.JSONCheck != nil {
+			arena.JSONCheck = fileCfg.JSONCheck
+		}
+		if fileCfg.FaultPattern != "" {
+			arena.FaultPattern = fileCfg.FaultPattern
+		}
 	}
 
 	// Check required flags
@@ -330,6 +350,9 @@ func run(args []string) int {
 
 	fmt.Println("All matches complete.")
 	fmt.Println(arena.PrintResults())
+	for _, warning := range arena.FaultWarnings() {
+		fmt.Println(warning)
+	}
 	noResult := arena.NoResultMessage()
 	if noResult != "" {
 		fmt.Println(noResult)

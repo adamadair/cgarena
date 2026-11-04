@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +41,13 @@ type Referee struct {
 	// Timeout is how long a game may run before the referee's process group
 	// is killed and the game is invalid (ReasonTimeout); 0 means no limit.
 	Timeout time.Duration
+	// JSONCheck, with logging on, makes the game invalid (ReasonJSONLog) when
+	// the referee's JSON log is missing or unparseable, or its scores differ
+	// from stdout. Without it a bad JSON log only loses EndReason and faults.
+	JSONCheck bool
+	// FaultPattern, if set, marks a seat as faulted when a line of a JSON log
+	// tooltip or summary matches it and names the seat as $<seat>.
+	FaultPattern *regexp.Regexp
 }
 
 // waitDelay is how long Run waits, after the referee was killed or exited,
@@ -61,6 +71,7 @@ const (
 	ReasonTimeout      = "timeout"
 	ReasonScoreCount   = "score_count"
 	ReasonSeedMismatch = "seed_mismatch"
+	ReasonJSONLog      = "json_log"
 )
 
 type RefereeResult struct {
@@ -79,6 +90,16 @@ type RefereeResult struct {
 	// had been started (and so was killed).
 	Interrupted bool
 	Killed      bool
+	// LogFile is the referee's JSON log path ("" with logging off).
+	LogFile string
+	// EndReason is the text of the last tooltip in the JSON log ("" if
+	// there is none or the log couldn't be read).
+	EndReason string
+	// Faults holds, per seat, whether the seat matched FaultPattern in the
+	// JSON log. It is all false for invalid games.
+	Faults []bool
+	// Duration is how long the referee ran.
+	Duration time.Duration
 }
 
 // InvalidGameError reports why a game is invalid.
@@ -124,8 +145,10 @@ func (r *Referee) RunContext(parent context.Context, matchId int) (*RefereeResul
 		args = append(args, "-seed", strconv.Itoa(sentSeed))
 	}
 
-	if r.LogOutput != "" && r.LogOutput != "none" && r.LogOutput != "off" {
-		logFile := filepath.Join(r.LogOutput, "match_"+strconv.Itoa(matchId)+".json")
+	logging := r.LogOutput != "" && r.LogOutput != "none" && r.LogOutput != "off"
+	logFile := ""
+	if logging {
+		logFile = filepath.Join(r.LogOutput, "match_"+strconv.Itoa(matchId)+".json")
 		args = append(args, "-l", logFile)
 	}
 
@@ -138,6 +161,13 @@ func (r *Referee) RunContext(parent context.Context, matchId int) (*RefereeResul
 		Seats:   seats,
 		Players: resultPlayers,
 		Seed:    sentSeed,
+		LogFile: logFile,
+		Faults:  make([]bool, len(seats)),
+	}
+	if parent.Err() != nil {
+		// Interrupted before the game started: don't create its files.
+		results.Interrupted = true
+		return results, ErrInterrupted
 	}
 
 	ctx := parent
@@ -152,7 +182,17 @@ func (r *Referee) RunContext(parent context.Context, matchId int) (*RefereeResul
 	cmd.WaitDelay = waitDelay
 	var out strings.Builder
 	cmd.Stdout = &out
+	if logging {
+		errFile, err := os.Create(filepath.Join(r.LogOutput, "match_"+strconv.Itoa(matchId)+".err"))
+		if err != nil {
+			return results.invalid(ReasonStartFailed, "creating stderr file: "+err.Error())
+		}
+		defer errFile.Close()
+		cmd.Stderr = errFile
+	}
+	start := time.Now()
 	err := cmd.Run()
+	results.Duration = time.Since(start)
 	if err != nil && parent.Err() != nil {
 		// Checked before the timeout: a kill caused by the interrupt is
 		// not a timeout or an exit status.
@@ -189,8 +229,134 @@ func (r *Referee) RunContext(parent context.Context, matchId int) (*RefereeResul
 		}
 		results.Seed = gotSeed
 	}
+	if logging {
+		gameLog, err := readGameLog(logFile)
+		if err == nil {
+			results.EndReason = gameLog.endReason()
+		}
+		if r.JSONCheck {
+			if err == nil {
+				err = gameLog.checkScores(results.Scores)
+			}
+			if err != nil {
+				return results.invalid(ReasonJSONLog, err.Error())
+			}
+		}
+		if err == nil && r.FaultPattern != nil {
+			for j := range seats {
+				results.Faults[j] = gameLog.faulted(r.FaultPattern, j)
+			}
+		}
+	}
 	results.ProcessResults()
 	return results, nil
+}
+
+// gameLog holds the parts of a CodinGame SDK JSON game log that cgarena reads.
+type gameLog struct {
+	// Scores maps seat index ("0", "1", ...) to score.
+	Scores   map[string]json.RawMessage `json:"scores"`
+	Tooltips []struct {
+		Text string `json:"text"`
+	} `json:"tooltips"`
+	// Summaries has one entry per frame; entries that aren't strings (e.g.
+	// null) are ignored.
+	Summaries []json.RawMessage `json:"summaries"`
+}
+
+// readGameLog reads and parses the JSON log at path.
+func readGameLog(path string) (*gameLog, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading JSON log: %w", err)
+	}
+	var gl gameLog
+	if err := json.Unmarshal(data, &gl); err != nil {
+		return nil, fmt.Errorf("parsing JSON log %s: %w", path, err)
+	}
+	return &gl, nil
+}
+
+// endReason returns the text of the last tooltip, or "" if there is none.
+func (gl *gameLog) endReason() string {
+	if len(gl.Tooltips) == 0 {
+		return ""
+	}
+	return gl.Tooltips[len(gl.Tooltips)-1].Text
+}
+
+// checkScores returns an error unless the log has exactly one score per seat
+// and each equals the stdout score of that seat.
+func (gl *gameLog) checkScores(stdout []int) error {
+	mismatch := func(detail string) error {
+		return fmt.Errorf("JSON log scores %s don't match stdout scores %v: %s", gl.scoresString(), stdout, detail)
+	}
+	if gl.Scores == nil {
+		return fmt.Errorf("JSON log has no scores")
+	}
+	if len(gl.Scores) != len(stdout) {
+		return mismatch(fmt.Sprintf("%d JSON scores for %d players", len(gl.Scores), len(stdout)))
+	}
+	for j, want := range stdout {
+		raw, ok := gl.Scores[strconv.Itoa(j)]
+		if !ok {
+			return mismatch(fmt.Sprintf("no JSON score for seat %d", j))
+		}
+		got, err := strconv.ParseFloat(strings.TrimSpace(string(raw)), 64)
+		if err != nil || got != float64(want) {
+			return mismatch(fmt.Sprintf("seat %d", j))
+		}
+	}
+	return nil
+}
+
+// scoresString formats Scores compactly for error messages.
+func (gl *gameLog) scoresString() string {
+	data, _ := json.Marshal(gl.Scores)
+	return string(data)
+}
+
+// texts returns every line of the tooltips and string summaries.
+func (gl *gameLog) texts() []string {
+	var lines []string
+	for _, tt := range gl.Tooltips {
+		lines = append(lines, strings.Split(tt.Text, "\n")...)
+	}
+	for _, raw := range gl.Summaries {
+		var s string
+		if json.Unmarshal(raw, &s) == nil {
+			lines = append(lines, strings.Split(s, "\n")...)
+		}
+	}
+	return lines
+}
+
+// faulted reports whether a tooltip or summary line matches pattern and
+// names seat as $<seat>. Lines are checked one by one because a frame's
+// summary can hold lines about several players.
+func (gl *gameLog) faulted(pattern *regexp.Regexp, seat int) bool {
+	for _, line := range gl.texts() {
+		if namesSeat(line, seat) && pattern.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
+
+// namesSeat reports whether line contains the token $<seat> (not followed by
+// another digit, so $1 doesn't match $12).
+func namesSeat(line string, seat int) bool {
+	token := "$" + strconv.Itoa(seat)
+	for {
+		i := strings.Index(line, token)
+		if i < 0 {
+			return false
+		}
+		line = line[i+len(token):]
+		if line == "" || line[0] < '0' || line[0] > '9' {
+			return true
+		}
+	}
 }
 
 // invalid marks the result invalid and returns it with an *InvalidGameError.
