@@ -150,13 +150,24 @@ func checkResultsFile(path string, overwrite bool) error {
 		return fmt.Errorf("results file %q: %w", path, err)
 	}
 	if info.IsDir() {
-		return fmt.Errorf("results file (-out) %q is a directory", path)
+		return usageErrorf("results file (-out) %q is a directory", path)
 	}
 	if info.Size() > 0 && !overwrite {
-		return fmt.Errorf("results file (-out) %q already holds results from an earlier run; "+
+		return usageErrorf("results file (-out) %q already holds results from an earlier run; "+
 			"use -overwrite to replace it, or choose another -out file", path)
 	}
 	return nil
+}
+
+// UsageError is an error RunContext returns for a setting that can't be used
+// (an existing log directory or -out file holding earlier results): a usage
+// error, not a failure during the run.
+type UsageError struct{ msg string }
+
+func (e *UsageError) Error() string { return e.msg }
+
+func usageErrorf(format string, args ...any) error {
+	return &UsageError{msg: fmt.Sprintf(format, args...)}
 }
 
 // Duration is a time.Duration that is written as a Go duration string
@@ -463,7 +474,7 @@ func prepareLogDir(dir string, overwrite bool) error {
 		if len(stale) > 1 {
 			example += ", ..."
 		}
-		return fmt.Errorf("log directory %q already contains %d result file(s) from an earlier run (%s); "+
+		return usageErrorf("log directory %q already contains %d result file(s) from an earlier run (%s); "+
 			"use -overwrite to delete them, or choose another -l directory", dir, len(stale), example)
 	}
 	for _, name := range stale {
@@ -492,7 +503,13 @@ func (a *Arena) NoResultMessage() string {
 }
 
 func (a *Arena) IsLoggingOutput() bool {
-	return a.LogOutput != "" && a.LogOutput != "none" && a.LogOutput != "off"
+	return isLogging(a.LogOutput)
+}
+
+// isLogging reports whether the log directory setting dir turns logging on:
+// it is not empty, "none" or "off".
+func isLogging(dir string) bool {
+	return dir != "" && dir != "none" && dir != "off"
 }
 
 // PrintResults returns the run's summary text (see RunSummary.Text).

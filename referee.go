@@ -131,9 +131,14 @@ func (r *Referee) Run(matchId int) (*RefereeResult, error) {
 // before the game finishes, the referee's process group is killed (as for a
 // timeout), the result's Interrupted is set and the error is ErrInterrupted.
 func (r *Referee) RunContext(parent context.Context, matchId int) (*RefereeResult, error) {
-	commandSplit := strings.Split(r.Command, " ")
-	runCommand := commandSplit[0]
-	args := append([]string{}, commandSplit[1:]...)
+	// Split on runs of whitespace; quoting is not supported.
+	commandSplit := strings.Fields(r.Command)
+	runCommand := ""
+	var args []string
+	if len(commandSplit) > 0 {
+		runCommand = commandSplit[0]
+		args = append(args, commandSplit[1:]...)
+	}
 
 	for i, seat := range r.Seats {
 		args = append(args, "-p"+strconv.Itoa(i+1), seat.Cmd)
@@ -145,7 +150,7 @@ func (r *Referee) RunContext(parent context.Context, matchId int) (*RefereeResul
 		args = append(args, "-seed", strconv.Itoa(sentSeed))
 	}
 
-	logging := r.LogOutput != "" && r.LogOutput != "none" && r.LogOutput != "off"
+	logging := isLogging(r.LogOutput)
 	logFile := ""
 	if logging {
 		logFile = filepath.Join(r.LogOutput, "match_"+strconv.Itoa(matchId)+".json")

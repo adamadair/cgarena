@@ -9,16 +9,14 @@ import (
 	"html"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 )
 
 const (
-	VERSION = "1.0.2"
+	VERSION = "1.1.0"
 )
 
 // Exit codes.
@@ -106,34 +104,70 @@ func (p *Player) WinPct() float64 {
 	return (float64(p.Wins*2) + float64(p.Ties)) / float64(total*2)
 }
 
-func loadConfig(path string) (*Arena, error) {
+// configFile is the JSON config file (-config). Every scalar field is a
+// pointer, so a config can set false, 0 or "" explicitly; nil means the key is
+// absent. A config value is used unless the corresponding flag is given
+// explicitly on the command line (see configFile.applyTo).
+type configFile struct {
+	Referee      *string   `json:"referee"`
+	Players      []Player  `json:"players"`
+	Games        *int      `json:"games"`
+	Threads      *int      `json:"threads"`
+	Seed         *int      `json:"seed"`
+	LogOutput    *string   `json:"log_output"`
+	Swap         *bool     `json:"swap"`
+	Overwrite    *bool     `json:"overwrite"`
+	Timeout      *Duration `json:"timeout"`
+	Out          *string   `json:"out"`
+	JSONCheck    *bool     `json:"json_check"`
+	FaultPattern *string   `json:"fault_pattern"`
+	Z            *float64  `json:"z"`
+	SummaryJSON  *string   `json:"summary_json"`
+	RunLog       *string   `json:"runlog"`
+}
+
+func loadConfig(path string) (*configFile, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	var cfg Arena
-	err = json.Unmarshal(data, &cfg)
-	return &cfg, err
+	var cfg configFile
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("config file %s: %w", path, err)
+	}
+	return &cfg, nil
 }
 
-func buildRefereeCmd(cfg *Arena, matchID int) *exec.Cmd {
-	args := []string{}
-	for i, player := range cfg.Players {
-		args = append(args, fmt.Sprintf("-p%d", i+1), player.Cmd)
+// fromConfig sets *dst to the config value v, unless v is absent (nil) or the
+// flag for it was given explicitly.
+func fromConfig[T any](dst *T, v *T, flagGiven bool) {
+	if v != nil && !flagGiven {
+		*dst = *v
 	}
-	args = append(args, "-d", fmt.Sprintf("seed=%d", cfg.Seed+matchID))
-	logFile := filepath.Join(cfg.LogOutput, fmt.Sprintf("match_%03d.json", matchID))
-	args = append(args, "-l", logFile)
-
-	return exec.Command("sh", "-c", fmt.Sprintf("%s %s", cfg.Referee, shellJoin(args)))
 }
 
-func shellJoin(args []string) string {
-	joined := ""
-	for _, a := range args {
-		joined += fmt.Sprintf("'%s' ", a)
+// applyTo sets a's settings from the config, except those whose flag was
+// given explicitly (explicit holds flag names, as set by FlagSet.Visit).
+// Players are handled by applyPlayerFlags.
+func (c *configFile) applyTo(a *Arena, explicit map[string]bool) {
+	fromConfig(&a.Referee, c.Referee, explicit["r"])
+	fromConfig(&a.Games, c.Games, explicit["n"])
+	fromConfig(&a.Threads, c.Threads, explicit["t"])
+	fromConfig(&a.Seed, c.Seed, explicit["i"])
+	fromConfig(&a.LogOutput, c.LogOutput, explicit["l"])
+	fromConfig(&a.Swap, c.Swap, explicit["s"])
+	fromConfig(&a.Overwrite, c.Overwrite, explicit["overwrite"])
+	fromConfig(&a.Timeout, c.Timeout, explicit["timeout"])
+	fromConfig(&a.Out, c.Out, explicit["out"])
+	fromConfig(&a.FaultPattern, c.FaultPattern, explicit["fault-pattern"])
+	fromConfig(&a.SummaryJSON, c.SummaryJSON, explicit["summary-json"])
+	fromConfig(&a.RunLog, c.RunLog, explicit["runlog"])
+	if c.JSONCheck != nil && !explicit["json-check"] {
+		a.JSONCheck = c.JSONCheck
 	}
-	return joined
+	if c.Z != nil && !explicit["z"] {
+		a.Z = c.Z
+	}
 }
 
 // markdownEscaper escapes characters that would break a Markdown table cell.
@@ -184,24 +218,57 @@ func writeSummaryJSON(s RunSummary, path string) error {
 	return os.WriteFile(path, append(data, '\n'), 0o644)
 }
 
-// applyPlayerNames sets player display names from the -pnN flag values.
-// Empty names are skipped, as are names for players that don't exist.
-func applyPlayerNames(players []Player, names ...string) {
-	for i, name := range names {
-		if name != "" && i < len(players) {
-			players[i].Name = name
-		}
-	}
-}
+// maxPlayers is the number of -pN/-pnN/-pcN flag sets.
+const maxPlayers = 4
 
-// applyCommitDirs sets player commit directories from the -pcN flag values,
-// skipping empty values and players that don't exist.
-func applyCommitDirs(players []Player, dirs ...string) {
-	for i, dir := range dirs {
-		if dir != "" && i < len(players) {
-			players[i].CommitDir = dir
+// applyPlayerFlags returns the player list: the config's players (base),
+// or Player1 and Player2 with no command when base is empty, with the
+// explicitly given -pN, -pnN and -pcN flags applied. cmds, names and dirs
+// hold the flag values by player (index 0 is player 1), and explicit the
+// names of the flags given. Empty values are ignored. A -pN for an existing
+// player replaces its command; for the player after the last one it adds
+// that player (named PlayerN). A -pN that would leave a gap, or a -pnN/-pcN
+// for a player that doesn't exist, is an error.
+func applyPlayerFlags(base []Player, explicit map[string]bool, cmds, names, dirs [maxPlayers]string) ([]Player, error) {
+	players := append([]Player(nil), base...)
+	if len(players) == 0 {
+		players = []Player{{Name: "Player1"}, {Name: "Player2"}}
+	}
+	given := func(prefix string, i int, value string) bool {
+		return value != "" && explicit[fmt.Sprintf("%s%d", prefix, i+1)]
+	}
+	for i, cmd := range cmds {
+		if !given("p", i, cmd) {
+			continue
+		}
+		switch {
+		case i < len(players):
+			players[i].Cmd = cmd
+		case i == len(players):
+			players = append(players, Player{Name: fmt.Sprintf("Player%d", i+1), Cmd: cmd})
+		default:
+			return nil, fmt.Errorf("-p%d is given but there is no player %d (give -p%d too)", i+1, i, i)
 		}
 	}
+	for i := range names {
+		for _, f := range []struct {
+			prefix, value string
+			set           func(*Player, string)
+		}{
+			{"pn", names[i], func(p *Player, v string) { p.Name = v }},
+			{"pc", dirs[i], func(p *Player, v string) { p.CommitDir = v }},
+		} {
+			if !given(f.prefix, i, f.value) {
+				continue
+			}
+			if i >= len(players) {
+				return nil, fmt.Errorf("-%s%d is given but there is no player %d (there are %d; add it with -p%d or in the config's players)",
+					f.prefix, i+1, i+1, len(players), i+1)
+			}
+			f.set(&players[i], f.value)
+		}
+	}
+	return players, nil
 }
 
 func main() {
@@ -260,9 +327,6 @@ func run(args []string) int {
 	if *oFlag {
 		println("Old mode is not implemented yet.")
 	}
-	if *sFlag {
-		println("Swap player positions is not implemented yet.")
-	}
 
 	if *hFlag {
 		fmt.Println("Usage:")
@@ -270,14 +334,18 @@ func run(args []string) int {
 		return exitOK
 	}
 
-	// Build config from flags first
+	// Flags given explicitly on the command line override the config file,
+	// whose values override the flag defaults.
+	explicit := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
 	arena := &Arena{
 		Referee:   *rFlag,
-		Players:   []Player{{Name: "Player1", Cmd: *p1Flag}, {Name: "Player2", Cmd: *p2Flag}},
 		Games:     *nFlag,
 		Threads:   *tFlag,
 		Seed:      *iFlag,
 		LogOutput: *lFlag,
+		Swap:      *sFlag,
+		Overwrite: *overwriteFlag,
 		Timeout:   Duration(*timeoutFlag),
 
 		Out:          *outFlag,
@@ -287,78 +355,25 @@ func run(args []string) int {
 		SummaryJSON:  *summaryJSONFlag,
 		RunLog:       *runLogFlag,
 	}
-
-	if *p3Flag != "" {
-		arena.Players = append(arena.Players, Player{Name: "Player3", Cmd: *p3Flag})
-	}
-
-	if *p4Flag != "" {
-		arena.Players = append(arena.Players, Player{Name: "Player4", Cmd: *p4Flag})
-	}
-
-	applyPlayerNames(arena.Players, *pn1Flag, *pn2Flag, *pn3Flag, *pn4Flag)
-	applyCommitDirs(arena.Players, *pc1Flag, *pc2Flag, *pc3Flag, *pc4Flag)
-
-	if *sFlag {
-		arena.Swap = true
-	}
-	if *overwriteFlag {
-		arena.Overwrite = true
-	}
-
-	// If arena config file is provided, override values from it
+	var configPlayers []Player
 	if *configPath != "" {
-		fileCfg, err := loadConfig(*configPath)
+		cfg, err := loadConfig(*configPath)
 		if err != nil {
-			log.Printf("Error: %v", err)
+			fmt.Println("Error: " + err.Error())
 			return exitUsage
 		}
-		if fileCfg.Referee != "" {
-			arena.Referee = fileCfg.Referee
-		}
-		if len(fileCfg.Players) > 0 {
-			arena.Players = fileCfg.Players
-		}
-		if fileCfg.Games != 0 {
-			arena.Games = fileCfg.Games
-		}
-		if fileCfg.Threads != 0 {
-			arena.Threads = fileCfg.Threads
-		}
-		if fileCfg.Seed != 0 {
-			arena.Seed = fileCfg.Seed
-		}
-		if fileCfg.LogOutput != "" {
-			arena.LogOutput = fileCfg.LogOutput
-		}
-		if fileCfg.Swap {
-			arena.Swap = fileCfg.Swap
-		}
-		if fileCfg.Overwrite {
-			arena.Overwrite = fileCfg.Overwrite
-		}
-		if fileCfg.Timeout != 0 {
-			arena.Timeout = fileCfg.Timeout
-		}
-		if fileCfg.Out != "" {
-			arena.Out = fileCfg.Out
-		}
-		if fileCfg.JSONCheck != nil {
-			arena.JSONCheck = fileCfg.JSONCheck
-		}
-		if fileCfg.FaultPattern != "" {
-			arena.FaultPattern = fileCfg.FaultPattern
-		}
-		if fileCfg.Z != nil {
-			arena.Z = fileCfg.Z
-		}
-		if fileCfg.SummaryJSON != "" {
-			arena.SummaryJSON = fileCfg.SummaryJSON
-		}
-		if fileCfg.RunLog != "" {
-			arena.RunLog = fileCfg.RunLog
-		}
+		cfg.applyTo(arena, explicit)
+		configPlayers = cfg.Players
 	}
+	players, err := applyPlayerFlags(configPlayers, explicit,
+		[maxPlayers]string{*p1Flag, *p2Flag, *p3Flag, *p4Flag},
+		[maxPlayers]string{*pn1Flag, *pn2Flag, *pn3Flag, *pn4Flag},
+		[maxPlayers]string{*pc1Flag, *pc2Flag, *pc3Flag, *pc4Flag})
+	if err != nil {
+		fmt.Println("Error: " + err.Error())
+		return exitUsage
+	}
+	arena.Players = players
 
 	// Check required flags
 	if arena.Referee == "" || len(arena.Players) < 2 || arena.Players[0].Cmd == "" || arena.Players[1].Cmd == "" {
@@ -378,7 +393,12 @@ func run(args []string) int {
 	}
 
 	if err := runArena(arena); err != nil {
-		log.Printf("Failed to run arena: %v", err)
+		var usage *UsageError
+		if errors.As(err, &usage) {
+			fmt.Println("Error: " + err.Error())
+		} else {
+			log.Printf("Failed to run arena: %v", err)
+		}
 		return exitUsage
 	}
 	summary := arena.Summary(time.Now())

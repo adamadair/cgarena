@@ -13,6 +13,6 @@
   "games": 10,
   "threads": 2,
   "seed": 12345,
-  "log_output": "results",
+  "log_output": "logs/config-example",
   "swap": true
 }

@@ -24,7 +24,7 @@ Or run directly with `go run .` followed by the flags below.
   -r "java -jar test-bin/cellularena-cli-1.0.jar" \
   -p1 "python3 test-bots/cellularena_p1.py" -pn1 AlphaBot \
   -p2 "python3 test-bots/cellularena_p2.py" -pn2 BetaBot \
-  -n 10 -t 2 -i 1234 -l results
+  -n 10 -t 2 -i 1234 -l logs/flags-example
 ```
 
 ### With a config file
@@ -45,38 +45,58 @@ Example `config.json`:
   "games": 10,
   "threads": 2,
   "seed": 12345,
-  "log_output": "results",
+  "log_output": "logs/config-example",
   "swap": true
 }
 ```
 
-Values in the config file override the corresponding command-line flags. Only non-zero or non-empty values are applied, so a config file can't turn a flag back off.
+The config keys are `referee`, `players` (each with `name`, `cmd` and optional `commit_dir`), `games`, `threads`, `seed`, `log_output`, `swap`, `overwrite`, `timeout`, `out`, `json_check`, `fault_pattern`, `z`, `summary_json` and `runlog`; each is described with its flag below. `-md` and `-html` have no config key.
+
+### Precedence
+
+Each setting comes from, in order of priority:
+
+1. the flag, if it is given explicitly on the command line (even with its default value, e.g. `-s=false` or `-timeout 30s`);
+2. the config file, if it has the key (any value counts, including `false`, `0` and `""`: `"swap": false` turns swapping off, `"timeout": "0s"` disables the timeout);
+3. the flag's default.
+
+Players work the same way, one field at a time. The player list starts as the config's `players`, or, without them, as two players named `Player1` and `Player2` with no command. `-pN`, `-pnN` and `-pcN` then override the command, name and commit directory of player *N* (counting from 1) and leave its other fields alone. A `-pN` for the player right after the last one adds that player (named `PlayerN` unless `-pnN` is given); that is how `-p3` and `-p4` add players. A `-pN` that would skip a player, or a `-pnN`/`-pcN` for a player that doesn't exist, is a usage error (exit code 1). Empty flag values (`-pn1 ""`) are ignored.
+
+For example, with the `config.json` above:
+
+```sh
+./cgarena -config config.json -n 4 -pn2 Beta2 -l logs/quick -timeout 0
+```
+
+plays 4 games instead of 10, with player 2 named `Beta2` (its command still comes from the config), logs to `logs/quick` and has no timeout. `threads`, `seed`, `swap` and player 1 still come from the config.
+
+**Breaking (1.1.0):** before 1.1.0 the config file overrode the flags, and only its non-zero values were used.
 
 ## Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-r` | | Referee command (required) |
-| `-p1`, `-p2` | | Commands for players 1 and 2 (required) |
-| `-p3`, `-p4` | | Commands for players 3 and 4 (optional) |
-| `-pn1` to `-pn4` | `Player1` to `Player4` | Optional display names for players 1 to 4 (`-pn3`/`-pn4` only apply if that player's command is given). Names must be unique. |
-| `-pc1` to `-pc4` | | Optional git directory each player's bot was built from (config key `commit_dir` per player). Its commit and dirty state are recorded in `-runlog` and `-summary-json`. See [Run log](#run-log). |
-| `-n` | `1` | Number of games to play (at least 1) |
-| `-t` | `1` | Number of games to run in parallel (at least 1) |
-| `-i` | `0` | Base seed. Without `-s`, game *N* uses `seed + N`; with `-s`, see [Seeds](#seeds). If 0 or less, a random base seed is picked and printed. |
-| `-l` | `off` | Directory for game logs. Logging is off unless you give a directory; `none` and `off` also turn it off. See [Log directory](#log-directory). |
-| `-overwrite` | `false` | Let `-l` point at a directory holding results from an earlier run, and delete those result files first. Also lets `-out` replace an existing non-empty file. |
+| `-r` | | Referee command (required; config key `referee`) |
+| `-p1`, `-p2` | | Commands for players 1 and 2 (required; config key `cmd` per player) |
+| `-p3`, `-p4` | | Commands for players 3 and 4 (optional; `-p4` needs a player 3) |
+| `-pn1` to `-pn4` | `Player1` to `Player4` | Optional display names for players 1 to 4 (config key `name` per player). Naming a player that doesn't exist is a usage error. Names must be unique. |
+| `-pc1` to `-pc4` | | Optional git directory each player's bot was built from (config key `commit_dir` per player); as for `-pnN`, the player must exist. Its commit and dirty state are recorded in `-runlog` and `-summary-json`. See [Run log](#run-log). |
+| `-n` | `1` | Number of games to play, at least 1 (config key `games`) |
+| `-t` | `1` | Number of games to run in parallel, at least 1 (config key `threads`) |
+| `-i` | `0` | Base seed. Without `-s`, game *N* uses `seed + N`; with `-s`, see [Seeds](#seeds). If 0 or less, a random base seed is picked and printed. Config key `seed`. |
+| `-l` | `off` | Directory for game logs. Logging is off unless you give a directory; `none` and `off` also turn it off. Config key `log_output`. See [Log directory](#log-directory). |
+| `-overwrite` | `false` | Let `-l` point at a directory holding results from an earlier run, and delete those result files first. Also lets `-out` replace an existing non-empty file. Config key `overwrite`. |
 | `-out` | `<log dir>/games.jsonl` with `-l`, else none | Per-game results file, one JSON object per line (config key `out`). See [Per-game results](#per-game-results). |
 | `-json-check` | `true` | With `-l`, make a game invalid (`json_log`) when the referee's JSON log is missing, unparseable, or its `scores` differ from stdout. Use `-json-check=false` (config `"json_check": false`) for referees that don't write the CodinGame SDK JSON log. Has no effect without `-l`. |
 | `-fault-pattern` | | Regular expression for bot faults (config key `fault_pattern`); needs `-l`. See [Faults](#faults). |
 | `-timeout` | `30s` | Per-game time limit, as a Go duration such as `45s` or `2m` (config key `timeout`, a string like `"45s"`). A game that runs longer is killed and counted as invalid (`timeout`). `0` disables the limit; a negative or unparseable value exits with code 1. See [Timeout](#timeout). |
-| `-s` | `false` | Swap player seats between games, playing each map from every seating. `-n` must then be a multiple of the number of seatings (2, 6 or 24 for 2, 3 or 4 players). |
+| `-s` | `false` | Swap player seats between games, playing each map from every seating. `-n` must then be a multiple of the number of seatings (2, 6 or 24 for 2, 3 or 4 players). Config key `swap`. |
 | `-z` | `1.96` | z value of the win-rate confidence interval (config key `z`): `1.96` is 95%, `2.576` is 99%. Must be greater than 0, otherwise cgarena exits with code 1. See [Statistics](#statistics). |
 | `-md` | | Write a Markdown summary to this path |
 | `-html` | | Write an HTML summary to this path |
 | `-summary-json` | | Write a JSON summary to this path (config key `summary_json`). See [JSON summary](#json-summary). |
 | `-runlog` | | Append one JSON line per run to this file (config key `runlog`). See [Run log](#run-log). |
-| `-config` | | Path to a JSON config file |
+| `-config` | | Path to a JSON config file (see [Precedence](#precedence)) |
 | `-v` | | Print the version |
 | `-h` | | Print help |
 
@@ -92,7 +112,9 @@ For each game, `cgarena` runs the referee command with these arguments appended:
 
 The seed of each game is described under [Seeds](#seeds).
 
-The referee is expected to print each player's score as a bare integer on its own line, in seat order. The referee command is split on spaces, so arguments containing spaces can't be quoted.
+The referee is expected to print each player's score as a bare integer on its own line, in seat order.
+
+The referee command (`-r`) is split on runs of spaces and tabs, and run directly, without a shell. **Quoting is not supported**: `"a b"` or `'a b'` is passed as the two arguments `"a` and `b"`, so no argument can contain a space. If you need one, put the command in a small script and pass the script's path. (Player commands are passed to the referee as single arguments and are not split by cgarena.)
 
 Each game ends in one of these outcomes:
 
@@ -137,7 +159,7 @@ Each referee is started in its own process group. When a game runs longer than `
 
 The process-group kill applies to Linux and macOS (and other Unix-like systems). **On other platforms, such as Windows, only the referee process is killed**; bots it started may keep running.
 
-As with the other config keys, a config `timeout` of `"0s"` is ignored rather than disabling the limit; use `-timeout 0`.
+In the config file, `"timeout": "0s"` disables the limit too.
 
 ### Interrupting a run
 
@@ -207,6 +229,14 @@ The first line repeats the run's seed range under a `Summary:` label, so the sum
 
 **Breaking:** this replaces the earlier `AlphaBot: 100.00% Win Rate; 10 Wins; 0 Losses; 0 Ties` lines; scripts that parse stdout need updating. For machine-readable totals use `-summary-json`.
 
+If no game produced a result (win, loss or draw) and at least one game was a double forfeit, cgarena prints a line after the summary and exits with code 3. This usually means both bot commands are broken, for example a missing executable, so every game ends `-1`/`-1`:
+
+```
+No game produced a result: all 10 games were double forfeits (check the bot commands)
+```
+
+When the run also had invalid games, the line reads `No game produced a result: 6 games were double forfeits and 4 invalid (check the bot commands)`. A run where every game was invalid gets no such line, since each invalid game is already reported.
+
 ### Statistics
 
 For each player, *n* = W + L + D counts its valid games that produced a result (double forfeits and invalid games are left out). The win rate is p̂ = (W + D/2) / *n*, and the interval is the Wilson score interval
@@ -232,7 +262,7 @@ With more than two players, each player's W/L/D, win rate and interval are again
 ```json
 {
   "date": "2026-11-03T21:30:00Z",
-  "cgarena": "1.0.2",
+  "cgarena": "1.1.0",
   "referee": "java -jar referee.jar",
   "seed_from": 100,
   "seed_to": 149,
@@ -269,7 +299,7 @@ A failure to write any summary file exits with code 1.
 `-runlog <file>` (config key `runlog`) appends one line to the file per run: the same object as the [JSON summary](#json-summary), on a single line. It keeps a history of runs, for example:
 
 ```json
-{"date":"2026-11-04T15:52:21Z","cgarena":"1.0.2","referee":"java -jar referee.jar","seed_from":100,"seed_to":101,"swap":true,"games":4,"threads":2,"z":1.96,"players":[{"name":"Boss","cmd":"mono bots/Boss.exe","commit":"1cb42e318b472bb8658ba52108fe69f13d0a4c31","dirty":true,"w":4,"l":0,"d":0,"win_rate":1,"ci":[0.5100999795960008,1],"faults":null},{"name":"L1Boss","cmd":"mono bots/L1Boss.exe","commit":"1cb42e318b472bb8658ba52108fe69f13d0a4c31","dirty":true,"w":0,"l":4,"d":0,"win_rate":0,"ci":[0,0.48990002040399916],"faults":null}],"double_forfeits":0,"invalid":0,"invalid_reasons":{},"interrupted":false,"results_file":"logs/games.jsonl"}
+{"date":"2026-11-04T15:52:21Z","cgarena":"1.1.0","referee":"java -jar referee.jar","seed_from":100,"seed_to":101,"swap":true,"games":4,"threads":2,"z":1.96,"players":[{"name":"Boss","cmd":"mono bots/Boss.exe","commit":"1cb42e318b472bb8658ba52108fe69f13d0a4c31","dirty":true,"w":4,"l":0,"d":0,"win_rate":1,"ci":[0.5100999795960008,1],"faults":null},{"name":"L1Boss","cmd":"mono bots/L1Boss.exe","commit":"1cb42e318b472bb8658ba52108fe69f13d0a4c31","dirty":true,"w":0,"l":4,"d":0,"win_rate":0,"ci":[0,0.48990002040399916],"faults":null}],"double_forfeits":0,"invalid":0,"invalid_reasons":{},"interrupted":false,"results_file":"logs/games.jsonl"}
 ```
 
 - The file is created if missing and only ever appended to, never truncated. Each run adds one complete line, written at once at the end of the run (`date` is the time the run ended, in UTC, RFC 3339).
@@ -281,15 +311,7 @@ Each player's commit comes from `-pc1` … `-pc4 <dir>` (or `"commit_dir"` in th
 
 Two bots built from the same working tree record the same commit. To compare an older version, build it from its own checkout (e.g. a `git worktree`) and point its `-pcN` there.
 
-`-pcN` flags, like `-pnN`, apply to the flag-defined players; when the config file defines `players`, set `commit_dir` there instead.
-
-If no game produced a result (win, loss or draw) and at least one game was a double forfeit, cgarena prints a line after the summary and exits with code 3. This usually means both bot commands are broken, for example a missing executable, so every game ends `-1`/`-1`:
-
-```
-No game produced a result: all 10 games were double forfeits (check the bot commands)
-```
-
-When the run also had invalid games, the line reads `No game produced a result: 6 games were double forfeits and 4 invalid (check the bot commands)`. A run where every game was invalid gets no such line, since each invalid game is already reported.
+`-pcN` overrides the `commit_dir` of config player *N*, like `-pnN` overrides its name (see [Precedence](#precedence)).
 
 ### Per-game results
 
@@ -323,7 +345,7 @@ Player names must be unique after the flags and config file are merged, otherwis
 | Code | Meaning |
 |------|---------|
 | `0` | All games were valid, and at least one produced a result (win, loss or draw). Some double forfeits are allowed: they are a bot result, not a harness fault. |
-| `1` | Usage or config error, such as a bad flag (including a negative or unparseable `-timeout`), missing referee or player, duplicate player names, `-n`/`-t` below 1, a log directory holding earlier results or an existing non-empty `-out` file without `-overwrite`, an invalid `-fault-pattern` or one given without `-l`, a `-z` that isn't greater than 0. Also a failure to write the results file or a summary file. |
+| `1` | Usage or config error, printed as a line starting with `Error:` (or by the flag parser), such as a bad flag (including a negative or unparseable `-timeout`), an unreadable or invalid config file, missing referee or player, a `-pnN`/`-pcN` for a player that doesn't exist, duplicate player names, `-n`/`-t` below 1, a log directory holding earlier results or an existing non-empty `-out` file without `-overwrite`, an invalid `-fault-pattern` or one given without `-l`, a `-z` that isn't greater than 0. Also a failure to write the results file or a summary file. |
 | `3` | The run completed, but at least one game was invalid, or no game produced a result (every valid game was a double forfeit). |
 | `130` | Interrupted by SIGINT or SIGTERM (see [Interrupting a run](#interrupting-a-run)): running referees were killed and the results are incomplete. This takes precedence over `3`. |
 
