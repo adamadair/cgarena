@@ -143,7 +143,7 @@ func TestRun_JSONLRecords(t *testing.T) {
 			t.Errorf("invalid game's scores aren't null: %s", line)
 		}
 	}
-	if strings.Contains(out, "Faults") {
+	if strings.Contains(out, "faults") {
 		t.Errorf("summary shows faults without -fault-pattern:\n%s", out)
 	}
 }
@@ -230,8 +230,8 @@ func TestRun_FaultPattern(t *testing.T) {
 		t.Errorf("end reasons = %q, %q", recs[0].EndReason, recs[1].EndReason)
 	}
 	for _, want := range []string{
-		"A: 100.00% Win Rate; 2 Wins; 0 Losses; 0 Ties; 0 Faults\n",
-		"B: 0.00% Win Rate; 0 Wins; 2 Losses; 0 Ties; 2 Faults\n",
+		"A: 2 W / 0 L / 0 D   win rate 100.0%  95% CI [34.2%, 100.0%]   faults 0\n",
+		"B: 0 W / 2 L / 0 D   win rate 0.0%  95% CI [0.0%, 65.8%]   faults 2\n",
 		"Warning: B faulted in all 2 games (check its command)\n",
 	} {
 		if !strings.Contains(out, want) {
@@ -257,7 +257,7 @@ func TestRun_FaultWarningOnlyWhenAllGamesFaulted(t *testing.T) {
 	if strings.Contains(out, "Warning:") {
 		t.Errorf("unexpected fault warning (each player faulted in 1 of 2 valid games):\n%s", out)
 	}
-	for _, want := range []string{"; 1 Faults\nB:", "B: 0.00% Win Rate; 0 Wins; 1 Losses; 0 Ties; 1 Faults\n"} {
+	for _, want := range []string{"   faults 1\nB:", "B: 0 W / 1 L / 0 D   win rate 0.0%  95% CI [0.0%, 79.3%]   faults 1\n"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}

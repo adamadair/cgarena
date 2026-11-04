@@ -58,7 +58,8 @@ func TestRun_SIGINTKillsRunningReferees(t *testing.T) {
 	for _, want := range []string{
 		"Interrupted: 1 of 6 games finished; killed 2 running referee(s)\n",
 		"Double forfeits: 0   Invalid: 0\n",
-		"Player1: 100.00% Win Rate; 1 Wins; 0 Losses; 0 Ties",
+		"Player1: 1 W / 0 L / 0 D   win rate 100.0%  95% CI [20.7%, 100.0%]\n",
+		"Summary: seeds 10..15 (6 maps, swap off, 1 of 6 games finished)\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)

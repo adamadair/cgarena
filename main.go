@@ -6,11 +6,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -127,42 +129,52 @@ func shellJoin(args []string) string {
 	return joined
 }
 
-func writeMarkdown(players []Player, path string) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
+// markdownEscaper escapes characters that would break a Markdown table cell.
+var markdownEscaper = strings.NewReplacer("|", "\\|", "\n", " ")
 
-	_, _ = fmt.Fprintln(f, "# Match Summary")
-	_, _ = fmt.Fprintln(f, "| Bot | Wins | Losses | Ties |")
-	_, _ = fmt.Fprintln(f, "|-----|------|--------|------|")
-	for _, r := range players {
-		_, _ = fmt.Fprintf(f, "| %s | %d | %d | %d |\n", r.Name, r.Wins, r.Losses, r.Ties)
+func writeMarkdown(s RunSummary, path string) error {
+	var sb strings.Builder
+	sb.WriteString("# Match Summary\n\n")
+	sb.WriteString(s.Header() + "\n\n")
+	fmt.Fprintf(&sb, "| Bot | W | L | D | Win rate | %s | Faults |\n", s.CILabel())
+	sb.WriteString("|-----|---|---|---|----------|--------|--------|\n")
+	for _, p := range s.Players {
+		fmt.Fprintf(&sb, "| %s | %d | %d | %d | %s | %s | %s |\n", markdownEscaper.Replace(p.Name),
+			p.W, p.L, p.D, p.WinRateText(), p.CIText(), p.FaultsText())
 	}
-	return nil
+	sb.WriteString("\n| Double forfeits | Invalid |\n")
+	sb.WriteString("|-----------------|---------|\n")
+	fmt.Fprintf(&sb, "| %d | %s |\n", s.DoubleForfeits, s.InvalidText())
+	return os.WriteFile(path, []byte(sb.String()), 0o644)
 }
 
-func writeHTML(players []Player, path string) error {
-	f, err := os.Create(path)
+func writeHTML(s RunSummary, path string) error {
+	esc := html.EscapeString
+	var sb strings.Builder
+	sb.WriteString("<!DOCTYPE html>\n<html>\n<head><title>Match Summary</title></head>\n<body>\n")
+	sb.WriteString("<h1>Match Summary</h1>\n")
+	sb.WriteString("<p>" + esc(s.Header()) + "</p>\n")
+	sb.WriteString("<table border='1'>\n")
+	fmt.Fprintf(&sb, "<tr><th>Bot</th><th>W</th><th>L</th><th>D</th><th>Win rate</th><th>%s</th><th>Faults</th></tr>\n",
+		esc(s.CILabel()))
+	for _, p := range s.Players {
+		fmt.Fprintf(&sb, "<tr><td>%s</td><td>%d</td><td>%d</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td></tr>\n",
+			esc(p.Name), p.W, p.L, p.D, esc(p.WinRateText()), esc(p.CIText()), esc(p.FaultsText()))
+	}
+	sb.WriteString("</table>\n")
+	sb.WriteString("<table border='1'>\n<tr><th>Double forfeits</th><th>Invalid</th></tr>\n")
+	fmt.Fprintf(&sb, "<tr><td>%d</td><td>%s</td></tr>\n", s.DoubleForfeits, esc(s.InvalidText()))
+	sb.WriteString("</table>\n</body>\n</html>\n")
+	return os.WriteFile(path, []byte(sb.String()), 0o644)
+}
+
+// writeSummaryJSON writes s as indented JSON to path.
+func writeSummaryJSON(s RunSummary, path string) error {
+	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, _ = fmt.Fprintln(f, "<!DOCTYPE html>")
-	_, _ = fmt.Fprintln(f, "<html>")
-	_, _ = fmt.Fprintln(f, "<head><title>Match Summary</title></head>")
-	_, _ = fmt.Fprintln(f, "<body>")
-	_, _ = fmt.Fprintln(f, "<h1>Match Summary</h1>")
-	_, _ = fmt.Fprintln(f, "<table border='1'>")
-	_, _ = fmt.Fprintln(f, "<tr><th>Bot</th><th>Wins</th><th>Losses</th><th>Ties</th></tr>")
-	for _, r := range players {
-		_, _ = fmt.Fprintf(f, "<tr><td>%s</td><td>%d</td><td>%d</td><td>%d</td></tr>\n", r.Name, r.Wins, r.Losses, r.Ties)
-	}
-	_, _ = fmt.Fprintln(f, "</table>")
-	_, _ = fmt.Fprintln(f, "</body>")
-	_, _ = fmt.Fprintln(f, "</html>")
-	return nil
+	return os.WriteFile(path, append(data, '\n'), 0o644)
 }
 
 // applyPlayerNames sets player display names from the -pnN flag values.
@@ -208,6 +220,8 @@ func run(args []string) int {
 	configPath := fs.String("config", "", "Path to JSON config")
 	markdownPath := fs.String("md", "", "Path to Markdown summary output")
 	htmlPath := fs.String("html", "", "Path to HTML summary output")
+	summaryJSONFlag := fs.String("summary-json", "", "Path to JSON summary output (also written for interrupted runs, with \"interrupted\": true)")
+	zFlag := fs.Float64("z", defaultZ, "z value of the win-rate confidence interval (1.96 = 95%, 2.576 = 99%); must be > 0")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -247,6 +261,8 @@ func run(args []string) int {
 		Out:          *outFlag,
 		JSONCheck:    jsonCheckFlag,
 		FaultPattern: *faultPatternFlag,
+		Z:            zFlag,
+		SummaryJSON:  *summaryJSONFlag,
 	}
 
 	if *p3Flag != "" {
@@ -309,6 +325,12 @@ func run(args []string) int {
 		if fileCfg.FaultPattern != "" {
 			arena.FaultPattern = fileCfg.FaultPattern
 		}
+		if fileCfg.Z != nil {
+			arena.Z = fileCfg.Z
+		}
+		if fileCfg.SummaryJSON != "" {
+			arena.SummaryJSON = fileCfg.SummaryJSON
+		}
 	}
 
 	// Check required flags
@@ -326,30 +348,37 @@ func run(args []string) int {
 		log.Printf("Failed to run arena: %v", err)
 		return exitUsage
 	}
+	summary := arena.Summary(time.Now())
+	// The JSON summary is written for interrupted runs too: it says so in
+	// its "interrupted" field, as the run log will.
+	if arena.SummaryJSON != "" {
+		if err := writeSummaryJSON(summary, arena.SummaryJSON); err != nil {
+			log.Printf("Failed to write JSON summary: %v", err)
+			return exitUsage
+		}
+	}
 	if arena.Interrupted {
-		// The run is incomplete: no summary files, no no-result check.
+		// The run is incomplete: no Markdown/HTML summaries, no no-result check.
 		fmt.Println(arena.InterruptedLine())
-		fmt.Println(arena.PrintResults())
+		fmt.Println(summary.Text())
 		return exitSignal
 	}
 
-	if markdownPath != nil && *markdownPath != "" {
-		// write markdown summary
-		if err := writeMarkdown(arena.Players, *markdownPath); err != nil {
+	if *markdownPath != "" {
+		if err := writeMarkdown(summary, *markdownPath); err != nil {
 			log.Printf("Failed to write markdown: %v", err)
 			return exitUsage
 		}
 	}
-	if htmlPath != nil && *htmlPath != "" {
-		// write HTML summary
-		if err := writeHTML(arena.Players, *htmlPath); err != nil {
+	if *htmlPath != "" {
+		if err := writeHTML(summary, *htmlPath); err != nil {
 			log.Printf("Failed to write HTML: %v", err)
 			return exitUsage
 		}
 	}
 
 	fmt.Println("All matches complete.")
-	fmt.Println(arena.PrintResults())
+	fmt.Println(summary.Text())
 	for _, warning := range arena.FaultWarnings() {
 		fmt.Println(warning)
 	}

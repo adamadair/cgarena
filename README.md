@@ -1,6 +1,6 @@
 # cgarena
 
-`cgarena` is a command-line tool that plays many games between bots using a CodinGame-style referee and reports each bot's wins, losses and ties. Games run in parallel, and player seats can be swapped between games so neither bot keeps a positional advantage.
+`cgarena` is a command-line tool that plays many games between bots using a CodinGame-style referee and reports each bot's wins, losses and draws, with a win rate and its confidence interval. Games run in parallel, and player seats can be swapped between games so neither bot keeps a positional advantage.
 
 ## Requirements
 
@@ -70,8 +70,10 @@ Values in the config file override the corresponding command-line flags. Only no
 | `-fault-pattern` | | Regular expression for bot faults (config key `fault_pattern`); needs `-l`. See [Faults](#faults). |
 | `-timeout` | `30s` | Per-game time limit, as a Go duration such as `45s` or `2m` (config key `timeout`, a string like `"45s"`). A game that runs longer is killed and counted as invalid (`timeout`). `0` disables the limit; a negative or unparseable value exits with code 1. See [Timeout](#timeout). |
 | `-s` | `false` | Swap player seats between games, playing each map from every seating. `-n` must then be a multiple of the number of seatings (2, 6 or 24 for 2, 3 or 4 players). |
+| `-z` | `1.96` | z value of the win-rate confidence interval (config key `z`): `1.96` is 95%, `2.576` is 99%. Must be greater than 0, otherwise cgarena exits with code 1. See [Statistics](#statistics). |
 | `-md` | | Write a Markdown summary to this path |
 | `-html` | | Write an HTML summary to this path |
+| `-summary-json` | | Write a JSON summary to this path (config key `summary_json`). See [JSON summary](#json-summary). |
 | `-config` | | Path to a JSON config file |
 | `-v` | | Print the version |
 | `-h` | | Print help |
@@ -96,8 +98,8 @@ Each game ends in one of these outcomes:
 |---------|------|
 | `win` / `loss` | The highest score is unique: that seat wins, the others lose. |
 | `draw` | Several seats share the highest score (and it is 0 or more): they draw, the others lose. |
-| `double_forfeit` | Every score is negative (e.g. `-1`/`-1`). Not counted in W/L/T or win rate; reported separately. |
-| `invalid` | See below. Not counted in W/L/T or win rate; reported separately. |
+| `double_forfeit` | Every score is negative (e.g. `-1`/`-1`). Not counted in W/L/D or win rate; reported separately. |
+| `invalid` | See below. Not counted in W/L/D or win rate; reported separately. |
 
 A game is invalid, with one of these reasons, when:
 
@@ -143,7 +145,7 @@ Pressing Ctrl-C (SIGINT) or sending SIGTERM stops the run cleanly. cgarena start
 Interrupted: 7 of 20 games finished; killed 4 running referee(s)
 ```
 
-followed by the usual summary of the games that finished, and exits with code 130. Games cut short by the interrupt count toward nothing: they are neither results nor invalid. The totals are only informational, because the run is incomplete, and the `-md`/`-html` summaries aren't written. A second Ctrl-C (or SIGTERM) while this cleanup is running exits at once with code 130, even if some processes may survive. On platforms without process groups, such as Windows, only the referee processes are killed, as for the timeout.
+followed by the usual summary of the games that finished, and exits with code 130. Games cut short by the interrupt count toward nothing: they are neither results nor invalid. The totals are only informational, because the run is incomplete, and the `-md`/`-html` summaries aren't written. A `-summary-json` file is still written, with `"interrupted": true`. A second Ctrl-C (or SIGTERM) while this cleanup is running exits at once with code 130, even if some processes may survive. On platforms without process groups, such as Windows, only the referee processes are killed, as for the timeout.
 
 If the referee exits but a process it started keeps the referee's stdout open, cgarena stops waiting for it after one second and uses the output it has read.
 
@@ -178,7 +180,7 @@ For TryAngle Catch, whose referee writes lines such as `$0 timeout!` and `$1: Un
 -fault-pattern 'timeout|Unknown command|not available'
 ```
 
-cgarena has no default pattern. Faults don't change outcomes: a bot that times out still loses. The summary shows each player's fault count (`; 2 Faults`), and the per-game record has a `fault` flag per player. Faults are only counted in valid games (double forfeits included). An invalid pattern, or `-fault-pattern` without `-l` (there is no JSON log to read), exits with code 1.
+cgarena has no default pattern. Faults don't change outcomes: a bot that times out still loses. The summary shows each player's fault count (`faults 2`), and the per-game record has a `fault` flag per player. Faults are only counted in valid games (double forfeits included). An invalid pattern, or `-fault-pattern` without `-l` (there is no JSON log to read), exits with code 1.
 
 If a player faulted in every valid game it played, cgarena prints a warning after the summary; the exit code is unchanged:
 
@@ -190,17 +192,73 @@ This catches a single broken bot command, which otherwise just looks like a bot 
 
 ## Output
 
-The run starts with the seed range line (see [Seeds](#seeds)). Progress is logged as each game finishes, followed by a summary:
+The run starts with the seed range line (see [Seeds](#seeds)). Progress is logged as each game finishes, followed by `All matches complete.` and a summary:
 
 ```
-AlphaBot: 100.00% Win Rate; 10 Wins; 0 Losses; 0 Ties
-BetaBot: 0.00% Win Rate; 0 Wins; 10 Losses; 0 Ties
-Double forfeits: 0   Invalid: 0
+Summary: seeds 100..149 (50 maps, swap on, 100 games)
+A: 61 W / 33 L / 4 D   win rate 64.3%  95% CI [54.4%, 73.1%]   faults 0
+B: 33 W / 61 L / 4 D   win rate 35.7%  95% CI [26.9%, 45.6%]   faults 2
+Double forfeits: 1   Invalid: 1 (timeout: 1)
 ```
 
-With `-fault-pattern`, each player line ends with its fault count, e.g. `; 0 Faults`.
+The first line repeats the run's seed range under a `Summary:` label, so the summary can be read on its own; for an interrupted run it ends with `7 of 100 games finished` instead. Each player line shows wins, losses and draws, the win rate and its confidence interval (see [Statistics](#statistics)). The `faults` column is only shown with `-fault-pattern`. The last line counts double forfeits and invalid games, which aren't in any player's W/L/D; invalid games are broken down by reason, e.g. `Invalid: 2 (exit_status_2: 1, score_count: 1)`.
 
-When there are invalid games, the totals line breaks them down by reason, e.g. `Invalid: 2 (exit_status_2: 1, score_count: 1)`.
+**Breaking:** this replaces the earlier `AlphaBot: 100.00% Win Rate; 10 Wins; 0 Losses; 0 Ties` lines; scripts that parse stdout need updating. For machine-readable totals use `-summary-json`.
+
+### Statistics
+
+For each player, *n* = W + L + D counts its valid games that produced a result (double forfeits and invalid games are left out). The win rate is p̂ = (W + D/2) / *n*, and the interval is the Wilson score interval
+
+```
+(p̂ + z²/2n ± z·sqrt(p̂(1−p̂)/n + z²/4n²)) / (1 + z²/n)
+```
+
+with z = 1.96 (95%) by default; `-z` (config key `z`) changes it, and the label follows (`-z 2.576` prints `99% CI`). With *n* = 0 the win rate and interval are printed as `n/a`.
+
+**Counting a draw as half a win is an approximation.** It is the usual convention, but a game with three possible outcomes isn't a binomial trial, so the interval is only approximate when there are draws (with few draws the difference is negligible).
+
+With more than two players, each player's W/L/D, win rate and interval are against the field: a game is a win for the player with the unique highest score, a draw for players tied for the highest score and a loss for everyone else, and the same formula is used.
+
+### Summary files
+
+`-md <file>` and `-html <file>` write the same summary as a table: the header line, then per player W, L, D, win rate, CI and faults (`n/a` without `-fault-pattern`), then a second table with the double-forfeit and invalid counts (with reasons). Player names are HTML-escaped in the HTML summary, and `|` is escaped in the Markdown one. Neither is written for an interrupted run.
+
+### JSON summary
+
+`-summary-json <file>` (config key `summary_json`) writes the summary as an indented JSON object:
+
+```json
+{
+  "date": "2026-11-03T21:30:00Z",
+  "cgarena": "1.0.2",
+  "referee": "java -jar referee.jar",
+  "seed_from": 100,
+  "seed_to": 149,
+  "swap": true,
+  "games": 100,
+  "threads": 4,
+  "players": [
+    {"name": "A", "cmd": "./bots/a", "commit": null, "dirty": null,
+     "w": 61, "l": 33, "d": 4, "win_rate": 0.6428571428571429,
+     "ci": [0.5443, 0.7307], "faults": 0},
+    {"name": "B", "...": "..."}
+  ],
+  "double_forfeits": 1,
+  "invalid": 1,
+  "invalid_reasons": {"timeout": 1},
+  "interrupted": false,
+  "results_file": "logs/games.jsonl"
+}
+```
+
+- `date` is the time the run ended, in UTC (RFC 3339). `games` is the number of games requested (`-n`).
+- `win_rate` and `ci` are fractions (not percentages) at the run's `-z`; both are `null` when the player has no win, loss or draw.
+- `faults` is `null` without `-fault-pattern`.
+- `commit` and `dirty` are always `null` for now.
+- `results_file` is the per-game results file (see [Per-game results](#per-game-results)), or `null` when there is none.
+- Unlike `-md`/`-html`, the file is also written for an interrupted run, with `"interrupted": true`, so the totals are clearly marked as incomplete.
+
+A failure to write any summary file exits with code 1.
 
 If no game produced a result (win, loss or draw) and at least one game was a double forfeit, cgarena prints a line after the summary and exits with code 3. This usually means both bot commands are broken, for example a missing executable, so every game ends `-1`/`-1`:
 
@@ -235,14 +293,14 @@ Games cut short by an interrupt (see [Interrupting a run](#interrupting-a-run)) 
 
 ### Player names
 
-Win rate counts a tie as half a win. Player names must be unique after the flags and config file are merged, otherwise cgarena exits with code 1. For self-play, give the two copies distinct names, e.g. `-pn1 A -pn2 B`. Results are attributed to players by their position in the player list; names are only used for display.
+Player names must be unique after the flags and config file are merged, otherwise cgarena exits with code 1. For self-play, give the two copies distinct names, e.g. `-pn1 A -pn2 B`. Results are attributed to players by their position in the player list; names are only used for display.
 
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
 | `0` | All games were valid, and at least one produced a result (win, loss or draw). Some double forfeits are allowed: they are a bot result, not a harness fault. |
-| `1` | Usage or config error, such as a bad flag (including a negative or unparseable `-timeout`), missing referee or player, duplicate player names, `-n`/`-t` below 1, a log directory holding earlier results or an existing non-empty `-out` file without `-overwrite`, an invalid `-fault-pattern` or one given without `-l`. Also a failure to write the results file. |
+| `1` | Usage or config error, such as a bad flag (including a negative or unparseable `-timeout`), missing referee or player, duplicate player names, `-n`/`-t` below 1, a log directory holding earlier results or an existing non-empty `-out` file without `-overwrite`, an invalid `-fault-pattern` or one given without `-l`, a `-z` that isn't greater than 0. Also a failure to write the results file or a summary file. |
 | `3` | The run completed, but at least one game was invalid, or no game produced a result (every valid game was a double forfeit). |
 | `130` | Interrupted by SIGINT or SIGTERM (see [Interrupting a run](#interrupting-a-run)): running referees were killed and the results are incomplete. This takes precedence over `3`. |
 

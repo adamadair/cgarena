@@ -7,13 +7,11 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"math"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -41,6 +39,11 @@ type Arena struct {
 	// FaultPattern is a regular expression for faults (see
 	// Referee.FaultPattern); it needs logging on.
 	FaultPattern string `json:"fault_pattern"`
+	// Z is the z value of the win-rate confidence interval (see wilson); nil
+	// means defaultZ (1.96, 95%). It must be > 0.
+	Z *float64 `json:"z"`
+	// SummaryJSON is the path of the JSON summary (RunSummary); "" for none.
+	SummaryJSON string `json:"summary_json"`
 
 	// Run totals that aren't attributed to a player. Decided counts valid
 	// games that produced a result (win, loss or draw).
@@ -76,6 +79,9 @@ func (a *Arena) Validate() error {
 	if a.Timeout < 0 {
 		return fmt.Errorf("timeout (-timeout) must not be negative, got %s", time.Duration(a.Timeout))
 	}
+	if a.Z != nil && !(*a.Z > 0 && !math.IsInf(*a.Z, 1)) {
+		return fmt.Errorf("confidence z value (-z) must be a positive number, got %v", *a.Z)
+	}
 	if _, err := a.faultRegexp(); err != nil {
 		return err
 	}
@@ -104,6 +110,14 @@ func (a *Arena) faultRegexp() (*regexp.Regexp, error) {
 		return nil, fmt.Errorf("invalid fault pattern (-fault-pattern) %q: %v", a.FaultPattern, err)
 	}
 	return re, nil
+}
+
+// z returns the z value of the confidence interval.
+func (a *Arena) z() float64 {
+	if a.Z == nil {
+		return defaultZ
+	}
+	return *a.Z
 }
 
 // jsonCheck reports whether JSON logs are cross-checked (with logging on).
@@ -478,34 +492,9 @@ func (a *Arena) IsLoggingOutput() bool {
 	return a.LogOutput != "" && a.LogOutput != "none" && a.LogOutput != "off"
 }
 
+// PrintResults returns the run's summary text (see RunSummary.Text).
 func (a *Arena) PrintResults() string {
-	var sb strings.Builder
-	for _, player := range a.Players {
-		sb.WriteString(player.Name + ": " + fmt.Sprintf("%.2f%% Win Rate; ", player.WinPct()*100) +
-			strconv.Itoa(player.Wins) + " Wins; " +
-			strconv.Itoa(player.Losses) + " Losses; " +
-			strconv.Itoa(player.Ties) + " Ties")
-		if a.FaultPattern != "" {
-			sb.WriteString("; " + strconv.Itoa(player.Faults) + " Faults")
-		}
-		sb.WriteString("\n")
-	}
-	sb.WriteString("Double forfeits: " + strconv.Itoa(a.DoubleForfeits) +
-		"   Invalid: " + strconv.Itoa(a.Invalid))
-	if a.Invalid > 0 {
-		reasons := make([]string, 0, len(a.InvalidReasons))
-		for reason := range a.InvalidReasons {
-			reasons = append(reasons, reason)
-		}
-		sort.Strings(reasons)
-		parts := make([]string, len(reasons))
-		for i, reason := range reasons {
-			parts[i] = reason + ": " + strconv.Itoa(a.InvalidReasons[reason])
-		}
-		sb.WriteString(" (" + strings.Join(parts, ", ") + ")")
-	}
-	sb.WriteString("\n")
-	return sb.String()
+	return a.Summary(time.Now()).Text()
 }
 
 // seatOrders returns the seat orders games cycle through: game g is played
