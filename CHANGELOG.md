@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Help text for `-pn1` to `-pn4` now describes them as display names instead of command lines.
+
 ## [1.0.1] - 2026-11-03
 
 ### Fixed
