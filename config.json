@@ -1,0 +1,18 @@
+{
+  "referee": "java -jar test-bin/cellularena-cli-1.0.jar",
+  "players": [
+    {
+      "name": "AlphaBot",
+      "cmd": "python3 test-bots/cellularena_p1.py"
+    },
+    {
+      "name": "BetaBot",
+      "cmd": "python3 test-bots/cellularena_p2.py"
+    }
+  ],
+  "games": 10,
+  "threads": 2,
+  "seed": 12345,
+  "log_output": "results",
+  "swap": true
+}
