@@ -103,6 +103,16 @@ func writeHTML(players []Player, path string) error {
 	return nil
 }
 
+// applyPlayerNames sets player display names from the -pnN flag values.
+// Empty names are skipped, as are names for players that don't exist.
+func applyPlayerNames(players []Player, names ...string) {
+	for i, name := range names {
+		if name != "" && i < len(players) {
+			players[i].Name = name
+		}
+	}
+}
+
 func main() {
 	// Command line flags
 	hFlag := flag.Bool("h", false, "Print help message")
@@ -114,10 +124,10 @@ func main() {
 	p2Flag := flag.String("p2", "", "Command line for player 2 (required)")
 	p3Flag := flag.String("p3", "", "Command line for player 3 (optional)")
 	p4Flag := flag.String("p4", "", "Command line for player 4 (optional)")
-	pn1Flag := flag.String("pn1", "", "Command line for player 1 (required)")
-	pn2Flag := flag.String("pn2", "", "Command line for player 2 (required)")
-	pn3Flag := flag.String("pn3", "", "Command line for player 3 (optional)")
-	pn4Flag := flag.String("pn4", "", "Command line for player 4 (optional)")
+	pn1Flag := flag.String("pn1", "", "Display name for player 1 (required)")
+	pn2Flag := flag.String("pn2", "", "Display name for player 2 (required)")
+	pn3Flag := flag.String("pn3", "", "Display name for player 3 (optional)")
+	pn4Flag := flag.String("pn4", "", "Display name for player 4 (optional)")
 	lFlag := flag.String("l", "logs", "Directory for game logs")
 	sFlag := flag.Bool("s", false, "Swap player positions")
 	iFlag := flag.Int("i", 0, "Initial seed for repeatable tests")
@@ -164,24 +174,7 @@ func main() {
 		arena.Players = append(arena.Players, Player{Name: "Player4", Cmd: *p4Flag})
 	}
 
-	if *pn1Flag != "" {
-		arena.Players[0].Name = *pn1Flag
-	}
-
-	if *pn2Flag != "" {
-		arena.Players[1].Name = *pn2Flag
-	}
-
-	if *pn3Flag != "" {
-		if len(arena.Players) > 2 {
-			arena.Players[2].Name = *pn3Flag
-		}
-	}
-	if *pn4Flag != "" {
-		if len(arena.Players) > 3 {
-			arena.Players[3].Name = *pn4Flag
-		}
-	}
+	applyPlayerNames(arena.Players, *pn1Flag, *pn2Flag, *pn3Flag, *pn4Flag)
 
 	if *sFlag {
 		arena.Swap = true
