@@ -1,7 +1,7 @@
 package main
 
 import (
-	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -13,11 +13,7 @@ func TestArena_Run(t *testing.T) {
 	}
 
 	// Setup Arena
-	tmpDir := os.TempDir()
-	logDir := tmpDir + "/cgarenalog"
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		t.Fatalf("Failed to create log directory: %v", err)
-	}
+	logDir := filepath.Join(t.TempDir(), "cgarenalog")
 	arena := Arena{
 		Referee:   CelluarenaReferee,
 		Players:   players,

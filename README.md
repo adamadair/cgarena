@@ -59,12 +59,14 @@ Values in the config file override the corresponding command-line flags. Only no
 | `-r` | | Referee command (required) |
 | `-p1`, `-p2` | | Commands for players 1 and 2 (required) |
 | `-p3`, `-p4` | | Commands for players 3 and 4 (optional) |
-| `-pn1` to `-pn4` | `Player1` to `Player4` | Display names for players 1 to 4 (`-pn3`/`-pn4` only apply if that player's command is given) |
-| `-n` | `1` | Number of games to play |
-| `-t` | `1` | Number of games to run in parallel |
-| `-i` | `0` | Initial seed. Game *N* uses `seed + N`. A seed of 0 or less is not passed to the referee. |
-| `-l` | `logs` | Directory for game logs. Use `none` or `off` to disable. |
-| `-s` | `false` | Swap player seats between games |
+| `-pn1` to `-pn4` | `Player1` to `Player4` | Optional display names for players 1 to 4 (`-pn3`/`-pn4` only apply if that player's command is given). Names must be unique. |
+| `-n` | `1` | Number of games to play (at least 1) |
+| `-t` | `1` | Number of games to run in parallel (at least 1) |
+| `-i` | `0` | Base seed. Without `-s`, game *N* uses `seed + N`; with `-s`, see [Seeds](#seeds). If 0 or less, a random base seed is picked and printed. |
+| `-l` | `off` | Directory for game logs. Logging is off unless you give a directory; `none` and `off` also turn it off. See [Log directory](#log-directory). |
+| `-overwrite` | `false` | Let `-l` point at a directory holding results from an earlier run, and delete those result files first |
+| `-timeout` | `30s` | Per-game time limit, as a Go duration such as `45s` or `2m` (config key `timeout`, a string like `"45s"`). A game that runs longer is killed and counted as invalid (`timeout`). `0` disables the limit; a negative or unparseable value exits with code 1. See [Timeout](#timeout). |
+| `-s` | `false` | Swap player seats between games, playing each map from every seating. `-n` must then be a multiple of the number of seatings (2, 6 or 24 for 2, 3 or 4 players). |
 | `-md` | | Write a Markdown summary to this path |
 | `-html` | | Write an HTML summary to this path |
 | `-config` | | Path to a JSON config file |
@@ -78,30 +80,116 @@ Values in the config file override the corresponding command-line flags. Only no
 For each game, `cgarena` runs the referee command with these arguments appended:
 
 ```
--p1 <player 1 cmd> -p2 <player 2 cmd> [-seed <seed+game>] [-l <log dir>/match_<game>.json]
+-p1 <player 1 cmd> -p2 <player 2 cmd> -seed <seed> [-l <log dir>/match_<game>.json]
 ```
 
-The referee is expected to print each player's score as a bare integer on its own line, in seat order. The highest score wins, and equal scores are a tie. The referee command is split on spaces, so arguments containing spaces can't be quoted.
+The seed of each game is described under [Seeds](#seeds).
+
+The referee is expected to print each player's score as a bare integer on its own line, in seat order. The referee command is split on spaces, so arguments containing spaces can't be quoted.
+
+Each game ends in one of these outcomes:
+
+| Outcome | Rule |
+|---------|------|
+| `win` / `loss` | The highest score is unique: that seat wins, the others lose. |
+| `draw` | Several seats share the highest score (and it is 0 or more): they draw, the others lose. |
+| `double_forfeit` | Every score is negative (e.g. `-1`/`-1`). Not counted in W/L/T or win rate; reported separately. |
+| `invalid` | See below. Not counted in W/L/T or win rate; reported separately. |
+
+A game is invalid, with one of these reasons, when:
+
+- `start_failed`: the referee command can't be started (for example, it doesn't exist).
+- `exit_status_<n>`: the referee exits with non-zero status *n*.
+- `timeout`: the game ran longer than `-timeout` and was killed (see [Timeout](#timeout)).
+- `score_count`: the number of integer score lines differs from the number of players. `null` scores count as no score line.
+- `seed_mismatch`: a `-seed` was sent but the referee printed a `seed=` line with a different value.
+
+Each invalid game is logged as soon as it finishes, with its game number, seed and reason, for example `Game 3 (seed 13) invalid: score_count: got 1 score lines for 2 players`.
 
 With swapping on, two players alternate seats every game. With more than two players, games cycle through every seat permutation.
 
-**The log directory is deleted and recreated at the start of each run** when logging is enabled. Don't point `-l` at a directory you want to keep.
+### Seeds
+
+Let *k* be the number of seatings: 1 without `-s`, 2 with `-s` and two players, and *P*! with `-s` and *P* players (6 for three, 24 for four). Game *g* (counting from 0) uses seed `i + g/k` (integer division) and seating *g* mod *k*. So:
+
+- without `-s`, game *g* uses seed `i + g`;
+- with `-s` and two players, games 0 and 1 share seed `i` with opposite seats, games 2 and 3 share `i+1`, and so on. Every map is played from every seating.
+
+With `-s`, `-n` must be a multiple of *k*, otherwise cgarena exits with code 1. A run uses seeds `i` to `i + n/k - 1` and prints that range when it starts, for example:
+
+```
+Seeds 100..149 (50 maps, swap on, 100 games)
+```
+
+If `-i` is not given (or is 0 or less), cgarena picks a random base seed in `[1, 2^31-1]`, keeping every seed of the run at most `2^31-1`, and uses it exactly as if it had been passed. The seed line then ends with `; random base seed, rerun with -i <seed>`, so any run can be repeated from its output. The config key `seed` sets the base seed too.
+
+### Timeout
+
+Each referee is started in its own process group. When a game runs longer than `-timeout` (default `30s`), cgarena kills the whole group with `SIGKILL`, so the bots the referee started die with it, and counts the game as invalid with reason `timeout`. The invalid-game line shows the limit, for example `Game 4 (seed 14) invalid: timeout: referee killed after 30s`. `-timeout 0` turns the limit off.
+
+The process-group kill applies to Linux and macOS (and other Unix-like systems). **On other platforms, such as Windows, only the referee process is killed**; bots it started may keep running.
+
+As with the other config keys, a config `timeout` of `"0s"` is ignored rather than disabling the limit; use `-timeout 0`.
+
+### Interrupting a run
+
+Pressing Ctrl-C (SIGINT) or sending SIGTERM stops the run cleanly. cgarena starts no new games, kills every referee that is still running together with its bots (the same process-group kill as for a timeout), waits for them, and then prints:
+
+```
+Interrupted: 7 of 20 games finished; killed 4 running referee(s)
+```
+
+followed by the usual summary of the games that finished, and exits with code 130. Games cut short by the interrupt count toward nothing: they are neither results nor invalid. The totals are only informational, because the run is incomplete, and the `-md`/`-html` summaries aren't written. A second Ctrl-C (or SIGTERM) while this cleanup is running exits at once with code 130, even if some processes may survive. On platforms without process groups, such as Windows, only the referee processes are killed, as for the timeout.
+
+If the referee exits but a process it started keeps the referee's stdout open, cgarena stops waiting for it after one second and uses the output it has read.
+
+## Log directory
+
+Logging is off by default. With `-l <dir>` (config key `log_output`), each game's referee log is written to `<dir>/match_<game>.json`. cgarena never deletes the log directory. At the start of a run it:
+
+- creates the directory if it doesn't exist;
+- uses it as is if it exists and holds no earlier results. Other files and subdirectories are left alone;
+- refuses to run (exit code 1) if it holds `match_*.json`, `match_*.err` or `games.jsonl` files, unless `-overwrite` (config key `overwrite`) is given;
+- with `-overwrite`, deletes only those files directly in the directory. Nothing else is touched, including subdirectories.
+
+So to rerun into the same directory, add `-overwrite`, or pick a fresh directory.
 
 ## Output
 
-Progress is logged as each game finishes, followed by a summary:
+The run starts with the seed range line (see [Seeds](#seeds)). Progress is logged as each game finishes, followed by a summary:
 
 ```
 AlphaBot: 100.00% Win Rate; 10 Wins; 0 Losses; 0 Ties
 BetaBot: 0.00% Win Rate; 0 Wins; 10 Losses; 0 Ties
+Double forfeits: 0   Invalid: 0
 ```
 
-Win rate counts a tie as half a win. Player names must be unique, because results are matched back to players by name.
+When there are invalid games, the totals line breaks them down by reason, e.g. `Invalid: 2 (exit_status_2: 1, score_count: 1)`.
+
+If no game produced a result (win, loss or draw) and at least one game was a double forfeit, cgarena prints a line after the summary and exits with code 3. This usually means both bot commands are broken, for example a missing executable, so every game ends `-1`/`-1`:
+
+```
+No game produced a result: all 10 games were double forfeits (check the bot commands)
+```
+
+When the run also had invalid games, the line reads `No game produced a result: 6 games were double forfeits and 4 invalid (check the bot commands)`. A run where every game was invalid gets no such line, since each invalid game is already reported.
+
+Win rate counts a tie as half a win. Player names must be unique after the flags and config file are merged, otherwise cgarena exits with code 1. For self-play, give the two copies distinct names, e.g. `-pn1 A -pn2 B`. Results are attributed to players by their position in the player list; names are only used for display.
+
+## Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | All games were valid, and at least one produced a result (win, loss or draw). Some double forfeits are allowed: they are a bot result, not a harness fault. |
+| `1` | Usage or config error, such as a bad flag (including a negative or unparseable `-timeout`), missing referee or player, duplicate player names, `-n`/`-t` below 1, or a log directory holding earlier results without `-overwrite`. |
+| `3` | The run completed, but at least one game was invalid, or no game produced a result (every valid game was a double forfeit). |
+| `130` | Interrupted by SIGINT or SIGTERM (see [Interrupting a run](#interrupting-a-run)): running referees were killed and the results are incomplete. This takes precedence over `3`. |
 
 ## Tests
 
 ```sh
 go test ./...
+go test -race ./...
 ```
 
-The tests are integration tests. They need `java` and `python3`, and must run from the repository root so the relative paths to `test-bin/` and `test-bots/` resolve.
+Most outcome and exit-code tests use small fake `sh` referees written to a temp directory. The remaining tests are integration tests: they need `java` and `python3`, and must run from the repository root so the relative paths to `test-bin/` and `test-bots/` resolve.

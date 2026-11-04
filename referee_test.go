@@ -19,8 +19,8 @@ func TestReferee_Run(t *testing.T) {
 
 	ref := Referee{
 		Command:   CelluarenaReferee,
-		Players:   players,
-		Seed:      1234,
+		Seats:     seatsOf(players),
+		Seed:      1235, // the exact seed to send: the arena computes it per game
 		LogOutput: "",
 	}
 

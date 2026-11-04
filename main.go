@@ -1,18 +1,81 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 )
 
 const (
 	VERSION = "1.0.2"
 )
+
+// Exit codes.
+const (
+	exitOK      = 0   // all games valid (double forfeits allowed)
+	exitUsage   = 1   // usage or config error
+	exitInvalid = 3   // run completed, but a game was invalid or no game produced a result
+	exitSignal  = 130 // interrupted by SIGINT/SIGTERM; results are incomplete
+)
+
+// Hooks for the interrupt handling in runArena, replaced by tests.
+var (
+	// notifySignals registers c for the signals that interrupt a run.
+	notifySignals = func(c chan<- os.Signal) { signal.Notify(c, os.Interrupt, syscall.SIGTERM) }
+	// stopSignals undoes notifySignals.
+	stopSignals = func(c chan<- os.Signal) { signal.Stop(c) }
+	// exitNow exits the process at once (a second signal during cleanup).
+	exitNow = os.Exit
+)
+
+// runArena plays the arena's games, interrupting the run on SIGINT or SIGTERM:
+// the first signal cancels the run (no new games, running referees are
+// killed, see Arena.RunContext); a second one before the run returns calls
+// exitNow(exitSignal) without waiting for the cleanup.
+func runArena(arena *Arena) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigs := make(chan os.Signal, 2)
+	notifySignals(sigs)
+	defer stopSignals(sigs)
+	runDone := make(chan struct{})
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		select {
+		case sig := <-sigs:
+			log.Printf("Received %v: killing running referees (send it again to exit at once)", sig)
+			cancel()
+		case <-runDone:
+			return
+		}
+		// Prefer a second signal that is already pending over runDone.
+		select {
+		case <-sigs:
+		default:
+			select {
+			case <-sigs:
+			case <-runDone:
+				return
+			}
+		}
+		log.Printf("Received a second signal: exiting without waiting for cleanup")
+		exitNow(exitSignal)
+	}()
+	err := arena.RunContext(ctx)
+	close(runDone)
+	<-handlerDone
+	return err
+}
 
 type Player struct {
 	Name   string `json:"name"`
@@ -38,11 +101,6 @@ func loadConfig(path string) (*Arena, error) {
 	var cfg Arena
 	err = json.Unmarshal(data, &cfg)
 	return &cfg, err
-}
-
-func clearLogDir(path string) {
-	_ = os.RemoveAll(path)
-	_ = os.MkdirAll(path, 0755)
 }
 
 func buildRefereeCmd(cfg *Arena, matchID int) *exec.Cmd {
@@ -114,33 +172,46 @@ func applyPlayerNames(players []Player, names ...string) {
 }
 
 func main() {
-	// Command line flags
-	hFlag := flag.Bool("h", false, "Print help message")
-	vFlag := flag.Bool("v", false, "Print version information")
-	nFlag := flag.Int("n", 1, "Number of games to play")
-	tFlag := flag.Int("t", 1, "Number of threads to spawn for the games")
-	rFlag := flag.String("r", "", "Command line for the referee (required)")
-	p1Flag := flag.String("p1", "", "Command line for player 1 (required)")
-	p2Flag := flag.String("p2", "", "Command line for player 2 (required)")
-	p3Flag := flag.String("p3", "", "Command line for player 3 (optional)")
-	p4Flag := flag.String("p4", "", "Command line for player 4 (optional)")
-	pn1Flag := flag.String("pn1", "", "Display name for player 1 (required)")
-	pn2Flag := flag.String("pn2", "", "Display name for player 2 (required)")
-	pn3Flag := flag.String("pn3", "", "Display name for player 3 (optional)")
-	pn4Flag := flag.String("pn4", "", "Display name for player 4 (optional)")
-	lFlag := flag.String("l", "logs", "Directory for game logs")
-	sFlag := flag.Bool("s", false, "Swap player positions")
-	iFlag := flag.Int("i", 0, "Initial seed for repeatable tests")
-	oFlag := flag.Bool("o", false, "Use old mode")
-	configPath := flag.String("config", "", "Path to JSON config")
-	markdownPath := flag.String("md", "", "Path to Markdown summary output")
-	htmlPath := flag.String("html", "", "Path to HTML summary output")
+	os.Exit(run(os.Args[1:]))
+}
 
-	flag.Parse()
+// run parses args, plays the games and returns the process exit code.
+func run(args []string) int {
+	fs := flag.NewFlagSet("cgarena", flag.ContinueOnError)
+	// Command line flags
+	hFlag := fs.Bool("h", false, "Print help message")
+	vFlag := fs.Bool("v", false, "Print version information")
+	nFlag := fs.Int("n", 1, "Number of games to play")
+	tFlag := fs.Int("t", 1, "Number of threads to spawn for the games")
+	rFlag := fs.String("r", "", "Command line for the referee (required)")
+	p1Flag := fs.String("p1", "", "Command line for player 1 (required)")
+	p2Flag := fs.String("p2", "", "Command line for player 2 (required)")
+	p3Flag := fs.String("p3", "", "Command line for player 3 (optional)")
+	p4Flag := fs.String("p4", "", "Command line for player 4 (optional)")
+	pn1Flag := fs.String("pn1", "", "Display name for player 1 (optional, default Player1)")
+	pn2Flag := fs.String("pn2", "", "Display name for player 2 (optional, default Player2)")
+	pn3Flag := fs.String("pn3", "", "Display name for player 3 (optional, default Player3)")
+	pn4Flag := fs.String("pn4", "", "Display name for player 4 (optional, default Player4)")
+	lFlag := fs.String("l", "off", "Directory for game logs (none or off disables logging)")
+	overwriteFlag := fs.Bool("overwrite", false, "Delete match_*.json, match_*.err and games.jsonl from an existing log directory instead of refusing to run")
+	sFlag := fs.Bool("s", false, "Swap player positions, playing each map from every seating (-n must be a multiple of the number of seatings)")
+	iFlag := fs.Int("i", 0, "Base seed (0 or less picks a random one, printed at the start); with -s, each map's seatings share a seed")
+	oFlag := fs.Bool("o", false, "Use old mode")
+	timeoutFlag := fs.Duration("timeout", 30*time.Second, "Per-game time limit as a Go duration (e.g. 45s, 2m); the referee and the bots it started are killed and the game is invalid (0 disables)")
+	configPath := fs.String("config", "", "Path to JSON config")
+	markdownPath := fs.String("md", "", "Path to Markdown summary output")
+	htmlPath := fs.String("html", "", "Path to HTML summary output")
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return exitOK
+		}
+		return exitUsage
+	}
 
 	if *vFlag {
 		fmt.Printf("cgarena version %s\n", VERSION)
-		os.Exit(0)
+		return exitOK
 	}
 
 	if *oFlag {
@@ -152,8 +223,8 @@ func main() {
 
 	if *hFlag {
 		fmt.Println("Usage:")
-		flag.PrintDefaults()
-		os.Exit(0)
+		fs.PrintDefaults()
+		return exitOK
 	}
 
 	// Build config from flags first
@@ -164,6 +235,7 @@ func main() {
 		Threads:   *tFlag,
 		Seed:      *iFlag,
 		LogOutput: *lFlag,
+		Timeout:   Duration(*timeoutFlag),
 	}
 
 	if *p3Flag != "" {
@@ -179,12 +251,16 @@ func main() {
 	if *sFlag {
 		arena.Swap = true
 	}
+	if *overwriteFlag {
+		arena.Overwrite = true
+	}
 
 	// If arena config file is provided, override values from it
 	if *configPath != "" {
 		fileCfg, err := loadConfig(*configPath)
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("Error: %v", err)
+			return exitUsage
 		}
 		if fileCfg.Referee != "" {
 			arena.Referee = fileCfg.Referee
@@ -207,33 +283,59 @@ func main() {
 		if fileCfg.Swap {
 			arena.Swap = fileCfg.Swap
 		}
+		if fileCfg.Overwrite {
+			arena.Overwrite = fileCfg.Overwrite
+		}
+		if fileCfg.Timeout != 0 {
+			arena.Timeout = fileCfg.Timeout
+		}
 	}
 
 	// Check required flags
 	if arena.Referee == "" || len(arena.Players) < 2 || arena.Players[0].Cmd == "" || arena.Players[1].Cmd == "" {
 		fmt.Println("Error: referee, player 1, and player 2 are required.")
-		flag.PrintDefaults()
-		os.Exit(1)
+		fs.PrintDefaults()
+		return exitUsage
+	}
+	if err := arena.Validate(); err != nil {
+		fmt.Println("Error: " + err.Error())
+		return exitUsage
 	}
 
-	err := arena.Run()
-	if err != nil {
-		log.Fatalf("Failed to run arena: %v", err)
+	if err := runArena(arena); err != nil {
+		log.Printf("Failed to run arena: %v", err)
+		return exitUsage
+	}
+	if arena.Interrupted {
+		// The run is incomplete: no summary files, no no-result check.
+		fmt.Println(arena.InterruptedLine())
+		fmt.Println(arena.PrintResults())
+		return exitSignal
 	}
 
 	if markdownPath != nil && *markdownPath != "" {
 		// write markdown summary
 		if err := writeMarkdown(arena.Players, *markdownPath); err != nil {
-			log.Fatalf("Failed to write markdown: %v", err)
+			log.Printf("Failed to write markdown: %v", err)
+			return exitUsage
 		}
 	}
 	if htmlPath != nil && *htmlPath != "" {
 		// write HTML summary
 		if err := writeHTML(arena.Players, *htmlPath); err != nil {
-			log.Fatalf("Failed to write HTML: %v", err)
+			log.Printf("Failed to write HTML: %v", err)
+			return exitUsage
 		}
 	}
 
 	fmt.Println("All matches complete.")
 	fmt.Println(arena.PrintResults())
+	noResult := arena.NoResultMessage()
+	if noResult != "" {
+		fmt.Println(noResult)
+	}
+	if arena.Invalid > 0 || noResult != "" {
+		return exitInvalid
+	}
+	return exitOK
 }
