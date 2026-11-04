@@ -4,11 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-`cgarena` is a Go CLI (single `main` package, no `go.mod` — it lives in GOPATH-style `~/go/src/cgarena`) that runs many games between bots using a CodinGame-style referee (a Java CLI jar), in parallel, and tallies wins/losses/ties. Not a git repository.
+`cgarena` is a Go CLI (single `main` package, module `cgarena`, no external dependencies) that runs many games between bots using a CodinGame-style referee (a Java CLI jar), in parallel, and tallies wins/losses/ties.
 
 ## Commands
-
-There is no go.mod, so use GOPATH mode or create one first if modules are required (`go mod init cgarena`).
 
 - Build: `go build -o cgarena .`
 - Run with config: `go run . -config config.json -md out.md -html out.html`
