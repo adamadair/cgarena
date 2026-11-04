@@ -59,7 +59,7 @@ Values in the config file override the corresponding command-line flags. Only no
 | `-r` | | Referee command (required) |
 | `-p1`, `-p2` | | Commands for players 1 and 2 (required) |
 | `-p3`, `-p4` | | Commands for players 3 and 4 (optional) |
-| `-pn1`, `-pn2` | `Player1`, `Player2` | Display names for players 1 and 2 |
+| `-pn1` to `-pn4` | `Player1` to `Player4` | Display names for players 1 to 4 (`-pn3`/`-pn4` only apply if that player's command is given) |
 | `-n` | `1` | Number of games to play |
 | `-t` | `1` | Number of games to run in parallel |
 | `-i` | `0` | Initial seed. Game *N* uses `seed + N`. A seed of 0 or less is not passed to the referee. |

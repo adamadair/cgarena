@@ -24,5 +24,5 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Gotchas
 
 - `main.go` has a leftover unused `buildRefereeCmd`/`shellJoin` path (uses `-d seed=` and `sh -c`) that is not what `Referee.Run` actually does.
-- Several flags are stubs: `-o` (old mode) only prints a message; `-s` just sets `Swap`. The `-pn3`/`-pn4` flags currently set the player's **Cmd**, not the name (likely a bug).
+- Several flags are stubs: `-o` (old mode) only prints a message; `-s` just sets `Swap`.
 - Referee scoring parsing assumes the referee prints scores as bare integers on their own lines, with the final line being empty.

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- `-pn3` and `-pn4` now set the player's name instead of its command.
+
 ## [1.0.0] - 2026-11-03
 
 Initial versioned release.
@@ -23,6 +27,5 @@ Initial versioned release.
 
 ### Known issues
 
-- `-pn3` and `-pn4` set the player's command instead of its name.
 - `-o` (old mode) is accepted but not implemented.
 - The referee command is split on spaces, so quoted arguments are not supported.

@@ -174,12 +174,12 @@ func main() {
 
 	if *pn3Flag != "" {
 		if len(arena.Players) > 2 {
-			arena.Players[2].Cmd = *pn3Flag
+			arena.Players[2].Name = *pn3Flag
 		}
 	}
 	if *pn4Flag != "" {
 		if len(arena.Players) > 3 {
-			arena.Players[3].Cmd = *pn4Flag
+			arena.Players[3].Name = *pn4Flag
 		}
 	}
 
