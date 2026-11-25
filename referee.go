@@ -90,16 +90,21 @@ type RefereeResult struct {
 	// had been started (and so was killed).
 	Interrupted bool
 	Killed      bool
-	// LogFile is the referee's JSON log path ("" with logging off).
+	// LogFile is the referee's JSON log path, or in old mode the game's
+	// transcript (match_<g>.log); "" with logging off.
 	LogFile string
 	// EndReason is the text of the last tooltip in the JSON log ("" if
 	// there is none or the log couldn't be read).
 	EndReason string
 	// Faults holds, per seat, whether the seat matched FaultPattern in the
-	// JSON log. It is all false for invalid games.
+	// JSON log, or in old mode whether it crashed. It is all false for
+	// invalid games.
 	Faults []bool
 	// Duration is how long the referee ran.
 	Duration time.Duration
+	// Ranking is the old-mode referee's ###End ranking (player indices best
+	// first, tied players written together); "" otherwise.
+	Ranking string
 }
 
 // InvalidGameError reports why a game is invalid.
@@ -157,18 +162,8 @@ func (r *Referee) RunContext(parent context.Context, matchId int) (*RefereeResul
 		args = append(args, "-l", logFile)
 	}
 
-	seats := append([]Seat(nil), r.Seats...)
-	resultPlayers := make([]Player, len(seats))
-	for i, seat := range seats {
-		resultPlayers[i] = Player{Name: seat.Name, Cmd: seat.Cmd}
-	}
-	results := &RefereeResult{
-		Seats:   seats,
-		Players: resultPlayers,
-		Seed:    sentSeed,
-		LogFile: logFile,
-		Faults:  make([]bool, len(seats)),
-	}
+	results := newRefereeResult(r.Seats, sentSeed, logFile)
+	seats := results.Seats
 	if parent.Err() != nil {
 		// Interrupted before the game started: don't create its files.
 		results.Interrupted = true

@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-24
+
+### Added
+
+- **Old mode (`-o`, config key `old_mode`)** plays games with old-style CodinGame referees (games created before Botters of the Galaxy and Ultimate Tic Tac Toe), as cg-brutaltester's `-o` does. cgarena starts the referee and the bots, sends `###Seed` and `###Start`, and passes lines between them for `###Input` and `###Output`. It logs `###Error`, and reads the result from the `###End` ranking. The first place wins, and a shared first place is a draw.
+  - A bot that crashes (its stdout ends before it sends the lines asked for, its stdin closes, or it can't be started) loses, and the crash counts as a fault. The game stops at once: if one bot is left it wins, and if several are left they draw.
+  - New invalid-game reasons: `protocol` (malformed or unknown `###` command, bad player index or ranking) and `no_end` (the referee stopped without `###End`). The `-timeout` limit kills the referee and every bot.
+  - With `-l`, each game writes a transcript to `match_<game>.log` and the stderr of the referee and bots to `match_<game>.err`, with each line prefixed by its source. `match_*.log` files count as earlier results for `-overwrite`.
+  - Per-game records get a `ranking` field, and the JSON summary and run log get `"old_mode": true`.
+  - `-fault-pattern` with `-o` is a usage error, and `-json-check` has no effect in old mode.
+- `test-bots/old_tictactoe_referee.py` and `test-bots/old_tictactoe_bot.py`, a small old-style referee and bot used by the integration tests.
+
+### Removed
+
+- The `Old mode is not implemented yet.` message printed with `-o`.
+
 ## [1.1.0] - 2026-11-04
 
 This release makes cgarena a harness whose results can be trusted: no failure is silently dropped, swapped games share their map, every run is reproducible from its output, and each run can be recorded with the bots' git commits. Several defaults and formats change; see **Breaking** below.

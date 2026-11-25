@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	VERSION = "1.1.0"
+	VERSION = "1.2.0"
 )
 
 // Exit codes.
@@ -124,6 +124,7 @@ type configFile struct {
 	Z            *float64  `json:"z"`
 	SummaryJSON  *string   `json:"summary_json"`
 	RunLog       *string   `json:"runlog"`
+	OldMode      *bool     `json:"old_mode"`
 }
 
 func loadConfig(path string) (*configFile, error) {
@@ -162,6 +163,7 @@ func (c *configFile) applyTo(a *Arena, explicit map[string]bool) {
 	fromConfig(&a.FaultPattern, c.FaultPattern, explicit["fault-pattern"])
 	fromConfig(&a.SummaryJSON, c.SummaryJSON, explicit["summary-json"])
 	fromConfig(&a.RunLog, c.RunLog, explicit["runlog"])
+	fromConfig(&a.OldMode, c.OldMode, explicit["o"])
 	if c.JSONCheck != nil && !explicit["json-check"] {
 		a.JSONCheck = c.JSONCheck
 	}
@@ -300,7 +302,7 @@ func run(args []string) int {
 	overwriteFlag := fs.Bool("overwrite", false, "Delete match_*.json, match_*.err and games.jsonl from an existing log directory (and replace an existing -out file) instead of refusing to run")
 	sFlag := fs.Bool("s", false, "Swap player positions, playing each map from every seating (-n must be a multiple of the number of seatings)")
 	iFlag := fs.Int("i", 0, "Base seed (0 or less picks a random one, printed at the start); with -s, each map's seatings share a seed")
-	oFlag := fs.Bool("o", false, "Use old mode")
+	oFlag := fs.Bool("o", false, "Old mode: the referee is an old-style CodinGame referee (###Start/###Input/###Output/###End over stdin/stdout); cgarena starts the bots and relays their lines")
 	timeoutFlag := fs.Duration("timeout", 30*time.Second, "Per-game time limit as a Go duration (e.g. 45s, 2m); the referee and the bots it started are killed and the game is invalid (0 disables)")
 	outFlag := fs.String("out", "", "Per-game results file, one JSON object per line (default <log dir>/games.jsonl with -l, else none)")
 	jsonCheckFlag := fs.Bool("json-check", true, "With -l, make a game invalid (json_log) if the referee's JSON log is missing, unparseable or its scores differ from stdout")
@@ -324,10 +326,6 @@ func run(args []string) int {
 		return exitOK
 	}
 
-	if *oFlag {
-		println("Old mode is not implemented yet.")
-	}
-
 	if *hFlag {
 		fmt.Println("Usage:")
 		fs.PrintDefaults()
@@ -347,6 +345,7 @@ func run(args []string) int {
 		Swap:      *sFlag,
 		Overwrite: *overwriteFlag,
 		Timeout:   Duration(*timeoutFlag),
+		OldMode:   *oFlag,
 
 		Out:          *outFlag,
 		JSONCheck:    jsonCheckFlag,

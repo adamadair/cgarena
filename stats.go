@@ -61,7 +61,8 @@ type PlayerSummary struct {
 	// null when the player has no win, loss or draw.
 	WinRate *float64    `json:"win_rate"`
 	CI      *[2]float64 `json:"ci"`
-	// Faults is null when no fault pattern was given (faults not measured).
+	// Faults is null when no fault pattern was given and old mode is off
+	// (faults not measured). In old mode a crash counts as a fault.
 	Faults *int `json:"faults"`
 }
 
@@ -75,6 +76,7 @@ type RunSummary struct {
 	SeedFrom       int             `json:"seed_from"`
 	SeedTo         int             `json:"seed_to"`
 	Swap           bool            `json:"swap"`
+	OldMode        bool            `json:"old_mode,omitempty"`
 	Games          int             `json:"games"`
 	Threads        int             `json:"threads"`
 	Z              float64         `json:"z"`
@@ -101,6 +103,7 @@ func (a *Arena) Summary(now time.Time) RunSummary {
 		SeedFrom:       a.Seed,
 		SeedTo:         gameSeed(a.Seed, a.Games-1, k),
 		Swap:           a.Swap,
+		OldMode:        a.OldMode,
 		Games:          a.Games,
 		Threads:        a.Threads,
 		Players:        make([]PlayerSummary, len(a.Players)),
@@ -126,7 +129,7 @@ func (a *Arena) Summary(now time.Time) RunSummary {
 			ps.WinRate = &rate
 			ps.CI = &[2]float64{lo, hi}
 		}
-		if a.FaultPattern != "" {
+		if a.FaultPattern != "" || a.OldMode {
 			faults := p.Faults
 			ps.Faults = &faults
 		}

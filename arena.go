@@ -44,6 +44,10 @@ type Arena struct {
 	Z *float64 `json:"z"`
 	// SummaryJSON is the path of the JSON summary (RunSummary); "" for none.
 	SummaryJSON string `json:"summary_json"`
+	// OldMode plays games with an old-style referee (see OldReferee): it
+	// talks to the bots through cgarena over stdin/stdout instead of
+	// starting them itself.
+	OldMode bool `json:"old_mode"`
 	// RunLog is the run log: one RunSummary JSON line is appended per run
 	// (see appendRunLog); "" for none.
 	RunLog string `json:"runlog"`
@@ -87,6 +91,10 @@ func (a *Arena) Validate() error {
 	}
 	if _, err := a.faultRegexp(); err != nil {
 		return err
+	}
+	if a.FaultPattern != "" && a.OldMode {
+		return fmt.Errorf("fault pattern (-fault-pattern) can't be used with old mode (-o): old referees write no JSON log " +
+			"(a player that crashes is counted as a fault instead)")
 	}
 	if a.FaultPattern != "" && !a.IsLoggingOutput() {
 		return fmt.Errorf("fault pattern (-fault-pattern) needs logging on (-l <dir>): faults are read from the referee's JSON logs")
@@ -256,6 +264,7 @@ func (a *Arena) RunContext(ctx context.Context) error {
 
 	refCmd, seed, logOutput, timeout := a.Referee, a.Seed, a.LogOutput, time.Duration(a.Timeout)
 	jsonCheck := a.jsonCheck()
+	oldMode := a.OldMode
 	jobs := make(chan int, a.Games)
 	results := make(chan gameResult)
 
@@ -269,17 +278,32 @@ func (a *Arena) RunContext(ctx context.Context) error {
 				if ctx.Err() != nil {
 					continue // interrupted: don't start any more games
 				}
-				ref := Referee{
-					Command:   refCmd,
-					Seats:     append([]Seat(nil), order[matchID%k]...),
-					Seed:      gameSeed(seed, matchID, k),
-					LogOutput: logOutput,
-					Timeout:   timeout,
-					JSONCheck: jsonCheck,
-					// A compiled Regexp is safe for concurrent use.
-					FaultPattern: faultPattern,
+				seats := append([]Seat(nil), order[matchID%k]...)
+				mapSeed := gameSeed(seed, matchID, k)
+				var result *RefereeResult
+				var err error
+				if oldMode {
+					ref := OldReferee{
+						Command:   refCmd,
+						Seats:     seats,
+						Seed:      mapSeed,
+						LogOutput: logOutput,
+						Timeout:   timeout,
+					}
+					result, err = ref.RunContext(ctx, matchID)
+				} else {
+					ref := Referee{
+						Command:   refCmd,
+						Seats:     seats,
+						Seed:      mapSeed,
+						LogOutput: logOutput,
+						Timeout:   timeout,
+						JSONCheck: jsonCheck,
+						// A compiled Regexp is safe for concurrent use.
+						FaultPattern: faultPattern,
+					}
+					result, err = ref.RunContext(ctx, matchID)
 				}
-				result, err := ref.RunContext(ctx, matchID)
 				results <- gameResult{matchID: matchID, result: result, err: err}
 			}
 		}()
@@ -373,6 +397,9 @@ type GameRecord struct {
 	InvalidReason string            `json:"invalid_reason"`
 	DurationMs    int64             `json:"duration_ms"`
 	Log           string            `json:"log"`
+	// Ranking is the old-mode ###End ranking (seat indices best first,
+	// tied seats written together); left out otherwise.
+	Ranking string `json:"ranking,omitempty"`
 }
 
 // newGameRecord builds the results-file record of a finished game.
@@ -388,6 +415,7 @@ func newGameRecord(gr gameResult) GameRecord {
 		InvalidReason: result.InvalidReason,
 		DurationMs:    result.Duration.Milliseconds(),
 		Log:           result.LogFile,
+		Ranking:       result.Ranking,
 	}
 	if result.InvalidReason == "" {
 		rec.Scores = result.Scores
@@ -434,13 +462,13 @@ func (a *Arena) FaultWarnings() []string {
 }
 
 // isResultFile reports whether a file name is one cgarena writes into the log
-// directory: match_*.json, match_*.err or games.jsonl. Only these files are
+// directory: match_*.json, match_*.err, match_*.log (old mode) or games.jsonl. Only these files are
 // considered earlier results, and only these are deleted by -overwrite.
 func isResultFile(name string) bool {
 	if name == "games.jsonl" {
 		return true
 	}
-	for _, pattern := range []string{"match_*.json", "match_*.err"} {
+	for _, pattern := range []string{"match_*.json", "match_*.err", "match_*.log"} {
 		if ok, _ := filepath.Match(pattern, name); ok {
 			return true
 		}

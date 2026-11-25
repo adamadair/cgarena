@@ -91,6 +91,7 @@ plays 4 games instead of 10, with player 2 named `Beta2` (its command still come
 | `-fault-pattern` | | Regular expression for bot faults (config key `fault_pattern`); needs `-l`. See [Faults](#faults). |
 | `-timeout` | `30s` | Per-game time limit, as a Go duration such as `45s` or `2m` (config key `timeout`, a string like `"45s"`). A game that runs longer is killed and counted as invalid (`timeout`). `0` disables the limit; a negative or unparseable value exits with code 1. See [Timeout](#timeout). |
 | `-s` | `false` | Swap player seats between games, playing each map from every seating. `-n` must then be a multiple of the number of seatings (2, 6 or 24 for 2, 3 or 4 players). Config key `swap`. |
+| `-o` | `false` | Old mode: the referee is an old-style CodinGame referee, as run by cg-brutaltester with `-o` (config key `old_mode`). See [Old mode](#old-mode). |
 | `-z` | `1.96` | z value of the win-rate confidence interval (config key `z`): `1.96` is 95%, `2.576` is 99%. Must be greater than 0, otherwise cgarena exits with code 1. See [Statistics](#statistics). |
 | `-md` | | Write a Markdown summary to this path |
 | `-html` | | Write an HTML summary to this path |
@@ -99,8 +100,6 @@ plays 4 games instead of 10, with player 2 named `Beta2` (its command still come
 | `-config` | | Path to a JSON config file (see [Precedence](#precedence)) |
 | `-v` | | Print the version |
 | `-h` | | Print help |
-
-`-o` (old mode) is accepted but not implemented.
 
 ## How it works
 
@@ -173,13 +172,41 @@ followed by the usual summary of the games that finished, and exits with code 13
 
 If the referee exits but a process it started keeps the referee's stdout open, cgarena stops waiting for it after one second and uses the output it has read.
 
+### Old mode
+
+Games created before Botters of the Galaxy and Ultimate Tic Tac Toe use "old" referees (see the cg-brutaltester wiki page "How to create an old referee"). With `-o` (config `"old_mode": true`), cgarena plays them the way cg-brutaltester's `-o` does. The referee doesn't start the bots and gets no arguments. cgarena starts the referee and one process per player (each command split on whitespace, each in its own process group), then passes lines between them:
+
+| Direction | Line | What cgarena does |
+|---|---|---|
+| to referee | `###Seed <seed>` | Sent first; the seed is computed as in [Seeds](#seeds) |
+| to referee | `###Start <players>` | Sent next |
+| from referee | `###Input X` | The following lines, up to the next `###` line, go to player X's stdin |
+| from referee | `###Output X N` | Reads N lines from player X's stdout and sends them to the referee |
+| from referee | `###Error X …` | Logged only |
+| from referee | `###End <ranking>` | Ends the game |
+
+Player indices start at 0 and are seats, so with `-s` seat 0 is whoever plays first in that game. The ranking lists the seats best first, with tied seats written together. For example, `###End 1 03 2` means seat 1 is first, seats 0 and 3 tie for second, and seat 2 is last. The first place wins and everyone else loses. If several seats share first place, they draw. Each seat gets a score (number of ranking groups minus its position, so `2,3,1,2` above), which is what `scores` shows in the [per-game results](#per-game-results). The raw ranking is saved in `ranking`. Lines from the referee outside an `###Input` block are logged and otherwise ignored.
+
+A player **crashes** when its stdout ends before it has sent the lines an `###Output` asked for, when its stdin is closed while cgarena is sending it input, or when it can't be started. The game then stops: crashed players lose. If one player is left, it wins; if several are left, they draw; if none is left, the game is a double forfeit. A crash counts as a **fault** for that player, so in old mode the `faults` column is always shown, and the warning for a player that faulted in every game points at a broken bot command. `end_reason` says who crashed and how, for example `player 1 crashed (stdout closed after 0 of 1 lines asked by ###Output)`.
+
+A player that hangs is only stopped by `-timeout`, which kills the referee and every player and makes the game invalid (`timeout`). Old mode also adds these reasons for invalid games:
+
+- `protocol`: an unknown or malformed `###` command, a player index out of range, or an `###End` ranking that doesn't name every seat exactly once;
+- `no_end`: the referee's stdout ended without `###End` (`exit_status_<n>` instead if it exited with a non-zero status);
+- `start_failed`: the referee couldn't be started.
+
+After `###End`, cgarena closes every stdin, waits up to one second for the processes to exit, then kills the rest. Old referees write no JSON log, so `-json-check` has no effect, and `-fault-pattern` together with `-o` is a usage error. With `-l`, each game writes:
+
+- `match_<game>.log`, a transcript of every line exchanged (`To referee: …`, `Referee: …`, `Player <seat>: …`);
+- `match_<game>.err`, holding the stderr of the referee and the players, each line prefixed with `Referee: ` or `Player <seat>: `.
+
 ## Log directory
 
 Logging is off by default. With `-l <dir>` (config key `log_output`), each game's referee log is written to `<dir>/match_<game>.json`, the referee's stderr is saved to `<dir>/match_<game>.err`, and the per-game results go to `<dir>/games.jsonl` (unless `-out` says otherwise). Without `-l`, the referee's stderr is discarded. cgarena never deletes the log directory. At the start of a run it:
 
 - creates the directory if it doesn't exist;
 - uses it as is if it exists and holds no earlier results. Other files and subdirectories are left alone;
-- refuses to run (exit code 1) if it holds `match_*.json`, `match_*.err` or `games.jsonl` files, unless `-overwrite` (config key `overwrite`) is given;
+- refuses to run (exit code 1) if it holds `match_*.json`, `match_*.err`, `match_*.log` (old mode) or `games.jsonl` files, unless `-overwrite` (config key `overwrite`) is given;
 - with `-overwrite`, deletes only those files directly in the directory. Nothing else is touched, including subdirectories.
 
 So to rerun into the same directory, add `-overwrite`, or pick a fresh directory.
@@ -286,7 +313,8 @@ With more than two players, each player's W/L/D, win rate and interval are again
 
 - `date` is the time the run ended, in UTC (RFC 3339). `games` is the number of games requested (`-n`).
 - `win_rate` and `ci` are fractions (not percentages) at the run's `-z`; both are `null` when the player has no win, loss or draw.
-- `faults` is `null` without `-fault-pattern`.
+- `faults` is `null` without `-fault-pattern` (in old mode it counts crashes; see [Old mode](#old-mode)).
+- `old_mode` is `true` for runs with `-o`, and left out otherwise.
 - `z` is the z value of the confidence intervals (`-z`).
 - `commit` and `dirty` are the player's git commit and whether its working tree had uncommitted changes, from `-pcN` / `commit_dir`; `null` without one or when git failed (see [Run log](#run-log)).
 - `results_file` is the per-game results file (see [Per-game results](#per-game-results)), or `null` when there is none.
@@ -332,7 +360,8 @@ Each finished game is written as one JSON object per line (JSONL), in completion
 | `fault` | Per player name, whether it matched `-fault-pattern`; all `false` without a pattern and for invalid games |
 | `invalid_reason` | `""` for valid games, else one of the reasons listed under [How it works](#how-it-works) |
 | `duration_ms` | How long the referee ran |
-| `log` | Path of the game's JSON log, as given with `-l`; `""` without `-l` |
+| `log` | Path of the game's JSON log, as given with `-l` (in old mode, its transcript `match_<game>.log`); `""` without `-l` |
+| `ranking` | Old mode only: the referee's `###End` ranking (seats best first, tied seats written together) |
 
 Games cut short by an interrupt (see [Interrupting a run](#interrupting-a-run)) are not written. If `-out` names an existing non-empty file, cgarena refuses to run (exit code 1) unless `-overwrite` is given, which replaces the file; an existing empty file is used. `games.jsonl` inside the log directory follows the log directory rules above. If writing the file fails during the run, cgarena logs the error, stops writing records and exits with code 1 after the games finish.
 
@@ -356,4 +385,4 @@ go test ./...
 go test -race ./...
 ```
 
-Most outcome and exit-code tests use small fake `sh` referees written to a temp directory. The remaining tests are integration tests: they need `java` and `python3`, and must run from the repository root so the relative paths to `test-bin/` and `test-bots/` resolve.
+Most outcome and exit-code tests use small fake `sh` referees written to a temp directory (old mode uses fake `sh` referees and bots too). The remaining tests are integration tests: they need `java` and `python3` (`test-bots/old_tictactoe_referee.py` is a small old-style referee), and must run from the repository root so the relative paths to `test-bin/` and `test-bots/` resolve.
